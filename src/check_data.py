@@ -1,36 +1,31 @@
 import os
 import pandas as pd
+from src import config
 
 
-def validate_dataset(file_name: str = "BTC-USD_1d.parquet") -> None:
-    # 1. Вычисляем корень проекта динамически
-    # __file__ — это путь к текущему скрипту (TraidER/src/check_data.py)
-    # Первый dirname возвращает папку src, второй — корень TraidER
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(current_dir)
-
-    # 2. Собираем точный путь к файлу в папке data
-    file_path = os.path.join(project_root, "data", file_name)
+def validate_dataset() -> None:
+    # 1. Берем точный путь к файлу напрямую из конфига
+    file_path = config.DATA_FILE_PATH
 
     if not os.path.exists(file_path):
         print(f" Ошибка: Файл не найден по пути: {file_path}")
         return
 
-    print(f"--- Анализ датасета: {file_name} ---")
+    print(f"--- Анализ датасета: {config.DATA_FILE_NAME} ---")
 
-    # 3. Безопасная загрузка
+    # 2. Безопасная загрузка
     df = pd.read_parquet(file_path)
 
-    # 4. Проверка на пустые значения (NaN)
+    # 3. Проверка на пустые значения (NaN)
     nan_counts = df.isna().sum().sum()
 
-    # 5. Проверка на логические аномалии (отрицательные цены)
+    # 4. Проверка на логические аномалии (отрицательные цены)
     negative_prices = (df[["Open", "High", "Low", "Close"]] <= 0).sum().sum()
 
-    # 6. Проверка на нулевые объемы
+    # 5. Проверка на нулевые объемы
     zero_volumes = (df["Volume"] <= 0).sum()
 
-    # 7. Проверка непрерывности календарной сетки дат
+    # 6. Проверка непрерывности календарной сетки дат
     df = df.sort_index()
     expected_range = pd.date_range(
         start=df.index.min(), end=df.index.max(), freq="D"

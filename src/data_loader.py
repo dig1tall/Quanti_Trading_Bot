@@ -1,10 +1,16 @@
 import os
 import pandas as pd
 import yfinance as yf
+from src import config
 
+#ticker (Тикер) — это краткое уникальное название актива на бирже.
+
+#interval (Таймфрейм) — это размер одной свечи (одной строчки в таблице).
+#1d (one day) означает, что одна строка в таблице — это итог одного торгового дня.
+#Если поставить 1h (one hour), то yfinance скачает часовые свечи, и в таблице будет детальная история по каждому часу.
 
 def download_crypto_data(
-    ticker: str = "BTC-USD", period: str = "2y", interval: str = "1d"
+    ticker: str = config.TICKER, period: str = config.PERIOD, interval: str = config.INTERVAL
 ) -> pd.DataFrame:
     """Скачивает исторические данные с yfinance, чистит их и сохраняет в Parquet."""
     print(f" Запуск загрузки данных для {ticker} ({interval})...")
@@ -33,20 +39,15 @@ def download_crypto_data(
         df = df.dropna()
 
         # 3. Сохранение
-        # Определяем путь к папке data относительно корня проекта
-        base_dir = os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__))
-        )  # Корень проекта
-        data_dir = os.path.join(base_dir, "data")
-        os.makedirs(data_dir, exist_ok=True)
+        os.makedirs(config.DATA_DIR, exist_ok=True)
 
-        file_path = os.path.join(data_dir, f"{ticker}_{interval}.parquet")
+        # Сохраняем в parquet по готовому пути из config
+        df.to_parquet(config.DATA_FILE_PATH, compression="snappy")
 
-        # Сохраняем в parquet
-        df.to_parquet(file_path, compression="snappy")
-
-        print(f" Данные сохранены в файл: {file_path}")
-        print(f"Размерность датасета: {df.shape[0]} строк, {df.shape[1]} колонок.")
+        print(f" Данные сохранены в файл: {config.DATA_FILE_PATH}")
+        print(
+            f"Размерность датасета: {df.shape[0]} строк, {df.shape[1]} колонок."
+        )
 
         return df
 
@@ -56,5 +57,4 @@ def download_crypto_data(
 
 
 if __name__ == "__main__":
-    # Тестовый запуск напрямую из модуля
     download_crypto_data()

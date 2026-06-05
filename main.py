@@ -1,17 +1,13 @@
+from src import config
 from src.data_loader import download_crypto_data
-
+from src.check_data import validate_dataset
 
 def main():
     print("=== Трейдинг-платформа TraidER: Сбор данных ===")
 
-    # Здесь мы можем легко менять конфигурацию для сбора
-    CONFIG = {"ticker": "BTC-USD", "interval": "1d", "period": "2y"}
-
-    # Запускаем универсальный загрузчик
+    # Запускаем универсальный загрузчик, передавая параметры из конфига
     df = download_crypto_data(
-        ticker=CONFIG["ticker"],
-        interval=CONFIG["interval"],
-        period=CONFIG["period"],
+        ticker=config.TICKER, interval=config.INTERVAL, period=config.PERIOD
     )
 
     if not df.empty:
@@ -19,6 +15,7 @@ def main():
     else:
         print("\n[Ошибка] Сбой при инициализации базы данных.")
 
+    validate_dataset()
 
 if __name__ == "__main__":
     main()
