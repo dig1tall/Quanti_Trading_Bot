@@ -1,16 +1,17 @@
 import os
 import pandas as pd
 import yfinance as yf
+
 from src import config
+from src.config import DATA_LOAD_PARAMS
 
-#ticker (Тикер) — это краткое уникальное название актива на бирже.
-
-#interval (Таймфрейм) — это размер одной свечи (одной строчки в таблице).
-#1d (one day) означает, что одна строка в таблице — это итог одного торгового дня.
-#Если поставить 1h (one hour), то yfinance скачает часовые свечи, и в таблице будет детальная история по каждому часу.
+# ticker (Тикер) — это краткое уникальное название актива на бирже.
+# interval (Таймфрейм) — это размер одной свечи (одной строчки в таблице).
 
 def download_crypto_data(
-    ticker: str = config.TICKER, period: str = config.PERIOD, interval: str = config.INTERVAL
+    ticker: str = DATA_LOAD_PARAMS['ticker'],
+    period: str = DATA_LOAD_PARAMS['period'],
+    interval: str = DATA_LOAD_PARAMS['interval']
 ) -> pd.DataFrame:
     """Скачивает исторические данные с yfinance, чистит их и сохраняет в Parquet."""
     print(f" Запуск загрузки данных для {ticker} ({interval})...")
@@ -57,4 +58,5 @@ def download_crypto_data(
 
 
 if __name__ == "__main__":
+    # Если запускаем файл напрямую, он сам возьмет дефолты из словаря
     download_crypto_data()
