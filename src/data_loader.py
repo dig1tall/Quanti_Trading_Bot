@@ -1,9 +1,13 @@
 import os
+import logging
 import pandas as pd
 import yfinance as yf
 
 from src import config
 from src.config import DATA_LOAD_PARAMS
+
+# Инициализируем логгер для текущего модуля
+logger = logging.getLogger(__name__)
 
 # ticker (Тикер) — это краткое уникальное название актива на бирже.
 # interval (Таймфрейм) — это размер одной свечи (одной строчки в таблице).
@@ -14,11 +18,11 @@ def download_crypto_data(
     interval: str = DATA_LOAD_PARAMS['interval']
 ) -> pd.DataFrame:
     """Скачивает исторические данные с yfinance, чистит их и сохраняет в Parquet."""
-    print(f" Запуск загрузки данных для {ticker} ({interval})...")
+    logger.info(f"Запуск загрузки данных для {ticker} ({interval}, период: {period})...")
 
     try:
-        # 1. Скачиваем данные
-        raw_data = yf.download(ticker, period=period, interval=interval)
+        # 1. Скачиваем данные ( progress=False отключает системный прогресс-бар в stderr)
+        raw_data = yf.download(ticker, period=period, interval=interval, progress=False)
 
         if raw_data.empty:
             raise ValueError(
@@ -45,18 +49,19 @@ def download_crypto_data(
         # Сохраняем в parquet по готовому пути из config
         df.to_parquet(config.DATA_FILE_PATH, compression="snappy")
 
-        print(f" Данные сохранены в файл: {config.DATA_FILE_PATH}")
-        print(
-            f"Размерность датасета: {df.shape[0]} строк, {df.shape[1]} колонок."
-        )
+        logger.info(f"Данные сохранены в файл: {config.DATA_FILE_PATH}")
+        logger.info(f"Размерность датасета: {df.shape[0]} строк, {df.shape[1]} колонок.")
 
         return df
 
     except Exception as e:
-        print(f" Ошибка в data_loader: {e}")
+        # exc_info=True автоматически прикрепит traceback ошибки к логу
+        logger.error(f"Ошибка в data_loader при обработке {ticker}: {e}", exc_info=True)
         return pd.DataFrame()
 
 
 if __name__ == "__main__":
-    # Если запускаем файл напрямую, он сам возьмет дефолты из словаря
+    from src.config import setup_logging
+    # Если запускаем файл напрямую, инициализируем базовый логгер для тестов
+    setup_logging(level=logging.INFO)
     download_crypto_data()
