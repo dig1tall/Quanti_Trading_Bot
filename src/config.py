@@ -22,11 +22,14 @@ DATA_FILE_PATH = os.path.join(DATA_DIR, DATA_FILE_NAME)
 
 # Настройки генерации признаков (Feature Engineering)
 FEATURE_PARAMS = {
+    'target_column': 'Close',
     'ema_fast_period': 12,
     'ema_slow_period': 26,
     'sma_period': 20,
     'rsi_period': 14,
-    'target_column': 'Close'
+    'macd_signal_period': 9,
+    'bb_period': 20,
+    'bb_std_dev': 2
 }
 
 # --- НАСТРОЙКИ ЛОГИРОВАНИЯ ---
