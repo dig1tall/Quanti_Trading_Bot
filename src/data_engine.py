@@ -2,10 +2,12 @@ import os
 import logging
 import pandas as pd
 
+from src import config
 from src.config import DATA_LOAD_PARAMS
 from src.data_loader import DataLoader
 from src.check_data import DataValidator
 from src.features import FeatureExtractor
+from src.config import FEATURES_FILE_PATH
 
 # Инициализируем логгер для модуля движка данных
 logger = logging.getLogger(__name__)
@@ -61,15 +63,13 @@ class DataEngine:
         self._save_features(df_features)
 
     def _save_features(self, df: pd.DataFrame) -> None:
-        """Внутренний метод для формирования имени и сохранения итогового датасета."""
-        clean_ticker = self.ticker.replace('-', '_')
-        features_filename = f"{clean_ticker}_{self.interval}_features.parquet"
+        """Внутренний метод для сохранения итогового датасета по системному пути."""
 
-        # Проверяем, существует ли папка data
-        os.makedirs('data', exist_ok=True)
-        save_path = os.path.join('data', features_filename)
+        # Папку DATA_DIR берем тоже из конфига, чтобы гарантировать её существование
+        os.makedirs(config.DATA_DIR, exist_ok=True)
 
-        # Сохраняем расширенный датасет в бинарный Parquet
-        df.to_parquet(save_path)
-        logger.info(f"Датасет с фичами сохранен в отдельный файл: {save_path}")
+        # Просто сохраняем по готовому пути из конфига
+        df.to_parquet(FEATURES_FILE_PATH)
+
+        logger.info(f"Датасет с фичами сохранен в отдельный файл: {FEATURES_FILE_PATH}")
         logger.info(f"Итоговый размер матрицы данных для нейросети: {df.shape}")

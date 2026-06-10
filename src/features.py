@@ -1,6 +1,9 @@
 import logging
 import numpy as np
 import pandas as pd
+import os
+
+from src import config
 from src.config import FEATURE_PARAMS
 
 # Инициализируем логгер для модуля генерации фич
@@ -130,3 +133,32 @@ class FeatureExtractor:
         except Exception as e:
             logger.error(f"Критический сбой при расчете математических признаков: {e}", exc_info=True)
             return pd.DataFrame()
+
+# --- АВТОНОМНЫЙ ТЕСТ МОДУЛЯ ---
+if __name__ == "__main__":
+    from src.config import setup_logging
+
+    # Инициализируем логгер через конфигурацию
+    setup_logging(level=logging.INFO)
+
+    logger.info("=== Запуск FeatureExtractor в автономном режиме ===")
+
+    # Берем путь к сырому базовому файлу цен из конфига
+    file_path = config.DATA_FILE_PATH
+
+    if os.path.exists(file_path):
+        # Загружаем сохраненный DataLoader'ом Parquet
+        base_df = pd.read_parquet(file_path)
+        logger.info(f"Успешно загружен базовый файл: {file_path} (Размерность: {base_df.shape})")
+
+        # Прогоняем экстрактор
+        extractor = FeatureExtractor()
+        df_with_features = extractor.extract_features(base_df)
+
+        print("\nПревью сгенерированных индикаторов (последние 3 строки):")
+        # Показываем только новые сгенерированные колонки, чтобы не захламлять консоль базовыми OHLCV
+        new_cols = [col for col in df_with_features.columns if col not in base_df.columns]
+        print(df_with_features[new_cols].tail(3))
+    else:
+        logger.error(f"Базовый файл с ценами не найден по пути: {file_path}")
+        logger.error("Сначала запусти модуль data_loader.py или main.py, чтобы скачать сырые данные.")
