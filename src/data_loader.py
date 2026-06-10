@@ -50,9 +50,6 @@ class DataLoader:
             # Удаляем пропуски (NaN), если они есть
             df = df.dropna()
 
-            # 3. Сохранение
-            self._save_to_parquet(df)
-
             return df
 
         except Exception as e:
@@ -60,8 +57,11 @@ class DataLoader:
             logger.error(f"Ошибка в data_loader при обработке {self.ticker}: {e}", exc_info=True)
             return pd.DataFrame()
 
-    def _save_to_parquet(self, df: pd.DataFrame) -> None:
-        """Внутренний изолированный метод для записи DataFrame на диск."""
+    def save_to_parquet(self, df: pd.DataFrame) -> None:
+        """Публичный изолированный метод для записи DataFrame на диск."""
+        if df.empty:
+            logger.warning("Попытка сохранить пустой DataFrame. Пропускаем запись.")
+            return
         try:
             os.makedirs(config.DATA_DIR, exist_ok=True)
 
@@ -75,10 +75,20 @@ class DataLoader:
             raise e
 
 
+# --- АВТОНОМНЫЙ ТЕСТ МОДУЛЯ ---
 if __name__ == "__main__":
     from src.config import setup_logging
-    # Если запускаем файл напрямую, инициализируем базовый логгер для тестов
     setup_logging(level=logging.INFO)
 
+    logger.info("=== Запуск DataLoader в автономном режиме ===")
+
     loader = DataLoader()
-    loader.download_crypto_data()
+    df_raw = loader.download_crypto_data()
+
+    if not df_raw.empty:
+        # В автономном тесте МЫ САМИ явно вызываем сохранение для проверки диска
+        #loader.save_to_parquet(df_raw)
+        print("\nПревью скачанных сырых данных:")
+        print(df_raw.tail(3))
+    else:
+        logger.error("Тестовая загрузка завершилась сбоем.")

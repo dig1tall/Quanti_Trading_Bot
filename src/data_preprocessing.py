@@ -55,46 +55,40 @@ class Scaler:
         logger.info(f"Параметры масштабирования успешно сохранены для {len(self.params)} признаков.")
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Применяет сохраненные параметры масштабирования к датафрейму."""
+        """Применяет сохраненные параметры масштабирования к указанным колонкам."""
         if not self.params:
-            raise RuntimeError("Scaler еще не обучен! Сначала вызови метод .fit()")
+            raise ValueError("Scaler еще не обучен! Сначала вызови метод fit().")
 
-        # Копируем датафрейм, чтобы не портить исходные данные
+        # Создаем копию, чтобы не портить исходный датафрейм в памяти
         df_scaled = df.copy()
 
-        for col, stats in self.params.items():
+        for col, col_params in self.params.items():
             if col not in df_scaled.columns:
                 continue
 
-            # Используем .loc[:, col] для избежания фрагментации памяти и SettingWithCopyWarning
-            if self.method == 'minmax':
-                col_min = stats['min']
-                col_max = stats['max']
-                if col_max != col_min:
-                    df_scaled.loc[:, col] = (df_scaled[col].to_numpy() - col_min) / (col_max - col_min)
-                else:
-                    df_scaled.loc[:, col] = 0.0
+            # ХАРДКОРНАЯ ЗАЩИТА: Явно кастуем колонку к float64 перед записью дробей,
+            # чтобы избежать падения Pandas (LossySetitemError / TypeError для int64 колонок вроде Volume)
+            df_scaled[col] = df_scaled[col].astype(float)
 
-            elif self.method == 'standard':
-                mean = stats['mean']
-                std = stats['std']
-                if std != 0.0:
-                    df_scaled.loc[:, col] = (df_scaled[col].to_numpy() - mean) / std
-                else:
-                    df_scaled.loc[:, col] = 0.0
+            if self.method == 'standard':
+                mean = col_params['mean']
+                std = col_params['std']
+                df_scaled.loc[:, col] = (df_scaled[col].to_numpy() - mean) / std
+
+            elif self.method == 'minmax':
+                min_val = col_params['min']
+                max_val = col_params['max']
+                df_scaled.loc[:, col] = (df_scaled[col].to_numpy() - min_val) / (max_val - min_val)
 
             elif self.method == 'robust':
-                median = stats['median']
-                iqr = stats['iqr']
-                if iqr != 0.0:
-                    df_scaled.loc[:, col] = (df_scaled[col].to_numpy() - median) / iqr
-                else:
-                    df_scaled.loc[:, col] = 0.0
+                median = col_params['median']
+                iqr = col_params['iqr']
+                df_scaled.loc[:, col] = (df_scaled[col].to_numpy() - median) / iqr
 
         return df_scaled
 
     def fit_transform(self, df: pd.DataFrame, columns: list) -> pd.DataFrame:
-        """Совмещает вычисление параметров и transformação."""
+        """Удобный метод-комбайн для одновременного обучения и трансформации."""
         self.fit(df, columns)
         return self.transform(df)
 
