@@ -3,10 +3,11 @@ import os
 import numpy as np
 import pandas as pd
 
-# Импортируем словари конфигурации по их зонам ответственности
+# Импорт словарей конфигурации по их зонам ответственности
 from src import config
 from src.config import SCALING_PARAMS
 
+# Инициализация логгера для модуля масштабирования фич
 logger = logging.getLogger(__name__)
 
 
@@ -20,7 +21,7 @@ class Scaler:
         if method not in ['standard', 'minmax', 'robust']:
             raise ValueError("Допустимые методы: 'standard', 'minmax', 'robust'")
         self.method = method
-        self.params = {}  # Здесь храним коэффициенты для каждой колонки
+        self.params = {}  # Здесь хранятся коэффициенты для каждой колонки
 
     def fit(self, df: pd.DataFrame, columns: list) -> None:
         """Вычисляет и сохраняет статистические параметры для указанных числовых колонок."""
@@ -59,14 +60,14 @@ class Scaler:
         if not self.params:
             raise ValueError("Scaler еще не обучен! Сначала вызови метод fit().")
 
-        # Создаем копию, чтобы не портить исходный датафрейм в памяти
+        # Создание копии, чтобы не портить исходный датафрейм в памяти
         df_scaled = df.copy()
 
         for col, col_params in self.params.items():
             if col not in df_scaled.columns:
                 continue
 
-            # ХАРДКОРНАЯ ЗАЩИТА: Явно кастуем колонку к float64 перед записью дробей,
+            # Явное приведение колонки к float64 перед записью дробей,
             # чтобы избежать падения Pandas (LossySetitemError / TypeError для int64 колонок вроде Volume)
             df_scaled[col] = df_scaled[col].astype(float)
 
@@ -97,24 +98,24 @@ class Scaler:
 if __name__ == "__main__":
     from src.config import setup_logging
 
-    # Настраиваем логирование через наш единый логгер из конфига
+    # Инициализация логгера через конфигурацию
     setup_logging(level=logging.INFO)
 
     logger.info("=== Запуск Scaler в автономном режиме на реальных данных ===")
 
-    # Берем готовый путь к файлу с фичами прямо из конфига путей
+    # Готовый путь к файлу с фичами прямо из конфига путей
     file_path = config.FEATURES_FILE_PATH
 
     if os.path.exists(file_path):
-        # Читаем реальный сгенерированный датасет
+        # Чтение датасета
         base_df = pd.read_parquet(file_path)
         logger.info(f"Успешно загружен файл для теста: {file_path} (Размерность: {base_df.shape})")
 
-        # Автоматически собираем фичи для масштабирования (все, кроме базовых колонок OHLCV)
+        # Автоматическая сборка фич для масштабирования (все, кроме базовых колонок OHLCV (для теста))
         base_cols = ["Open", "High", "Low", "Close", "Volume"]
         cols_to_scale = [col for col in base_df.columns if col not in base_cols]
 
-        # Создаем экземпляр, метод подтянется сам из SCALING_PARAMS['method']
+        # Создание экземпляра, метод подтянется сам из SCALING_PARAMS['method']
         scaler = Scaler()
         scaled_df = scaler.fit_transform(base_df, cols_to_scale)
 

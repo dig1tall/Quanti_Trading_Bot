@@ -6,22 +6,18 @@ import yfinance as yf
 from src import config
 from src.config import DATA_LOAD_PARAMS
 
-# Инициализируем логгер для текущего модуля
+# Инициализация логгера для текущего модуля
 logger = logging.getLogger(__name__)
-
-# ticker (Тикер) — это краткое уникальное название актива на бирже.
-# interval (Таймфрейм) — это размер одной свечи (одной строчки в таблице).
 
 
 class DataLoader:
     """
     Класс для загрузки, очистки и сохранения исторических рыночных данных.
-    Разработан в соответствии с принципами чистой архитектуры (ООП).
     """
     def __init__(self, ticker: str = None, interval: str = None, period: str = None):
-        self.ticker = ticker if ticker is not None else DATA_LOAD_PARAMS['ticker']
+        self.ticker   = ticker if ticker is not None else DATA_LOAD_PARAMS['ticker']
         self.interval = interval if interval is not None else DATA_LOAD_PARAMS['interval']
-        self.period = period if period is not None else DATA_LOAD_PARAMS['period']
+        self.period   = period if period is not None else DATA_LOAD_PARAMS['period']
         self.required_cols = ["Open", "High", "Low", "Close", "Volume"]
 
     def download_crypto_data(self) -> pd.DataFrame:
@@ -29,7 +25,7 @@ class DataLoader:
         logger.info(f"Запуск загрузки данных для {self.ticker} ({self.interval}, период: {self.period})...")
 
         try:
-            # 1. Скачиваем данные ( progress=False отключает системный прогресс-бар в stderr)
+            # 1. Скачивание данных ( progress=False отключает системный прогресс-бар в stderr)
             raw_data = yf.download(self.ticker, period=self.period, interval=self.interval, progress=False)
 
             if raw_data.empty:
@@ -44,10 +40,10 @@ class DataLoader:
                 col[0] if isinstance(col, tuple) else col for col in df.columns
             ]
 
-            # Оставляем только классический OHLCV
+            # Только классический OHLCV
             df = df[self.required_cols]
 
-            # Удаляем пропуски (NaN), если они есть
+            # Удаление пропусков (NaN), если они есть
             df = df.dropna()
 
             return df
@@ -58,14 +54,14 @@ class DataLoader:
             return pd.DataFrame()
 
     def save_to_parquet(self, df: pd.DataFrame) -> None:
-        """Публичный изолированный метод для записи DataFrame на диск."""
+        """Публичный изолированный метод для записи DataFrame."""
         if df.empty:
             logger.warning("Попытка сохранить пустой DataFrame. Пропускаем запись.")
             return
         try:
             os.makedirs(config.DATA_DIR, exist_ok=True)
 
-            # Сохраняем в parquet по готовому пути из config
+            # Сохранение в parquet по готовому пути из config
             df.to_parquet(config.DATA_FILE_PATH, compression="snappy")
 
             logger.info(f"Данные сохранены в файл: {config.DATA_FILE_PATH}")

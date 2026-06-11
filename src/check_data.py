@@ -1,9 +1,10 @@
 import os
 import logging
 import pandas as pd
+
 from src import config
 
-# Инициализируем логгер для текущего модуля
+# Инициализация логгера для текущего модуля
 logger = logging.getLogger(__name__)
 
 
@@ -13,8 +14,9 @@ class DataValidator:
     Проверяет DataFrame на пропуски, логические аномалии и непрерывность временной сетки.
     """
     def __init__(self):
-        # Пытаемся определить частоту из конфига (например, '1d' для yfinance — это 'D' в pandas)
-        self.freq = 'D' if config.DATA_LOAD_PARAMS['interval'] == '1d' else None
+        # Определение частоты для pandas (для '1d' -> 'D'). Если интервал другой (н-р, '1h'),
+        # запишется None, и проверка непрерывности сетки будет временно пропущена.
+        self.freq       = 'D' if config.DATA_LOAD_PARAMS['interval'] == '1d' else None
         self.price_cols = ["Open", "High", "Low", "Close"]
 
     def validate_dataset(self, df: pd.DataFrame) -> None:
@@ -67,10 +69,9 @@ class DataValidator:
             logger.warning("[Внимание] В данных обнаружены аномалии! Рекомендуется проверить сырой источник.")
 
 
-# Этот блок сработает ТОЛЬКО если ты запустишь этот файл напрямую в PyCharm
+# --- АВТОНОМНЫЙ ТЕСТ МОДУЛЯ ---
 if __name__ == "__main__":
     from src.config import setup_logging
-    # Инициализируем базовый логгер для автономного теста файла
     setup_logging(level=logging.INFO)
 
     logger.info("Запуск валидации в автономном режиме для базового файла...")
@@ -78,7 +79,7 @@ if __name__ == "__main__":
     if os.path.exists(file_path):
         base_df = pd.read_parquet(file_path)
 
-        # Создаем экземпляр валидатора и тестируем
+        # Создание экземпляра валидатора и тестируем
         validator = DataValidator()
         validator.validate_dataset(base_df)
     else:

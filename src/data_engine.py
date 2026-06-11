@@ -9,17 +9,17 @@ from src.check_data import DataValidator
 from src.features import FeatureExtractor
 from src.data_preprocessing import Scaler
 
-# Инициализируем логгер для модуля движка данных
+# Инициализация логгера для модуля движка данных
 logger = logging.getLogger(__name__)
 
 
 class DataEngine:
     """
-    Класс-оркестратор (Engine), управляющий всем конвейером обработки данных Quanti.
+    Класс-диспетчер (Engine), управляющий всем конвейером обработки данных Quanti.
     Связывает DataLoader, DataValidator, FeatureExtractor и Scaler в единый пайплайн.
     """
     def __init__(self):
-        # Явно извлекаем параметры из конфигурации — теперь сразу видно, с чем работает бот
+        # Извлечение параметров из конфигурации — теперь сразу видно, с чем работает бот
         self.ticker = DATA_LOAD_PARAMS['ticker']
         self.interval = DATA_LOAD_PARAMS['interval']
         self.period = DATA_LOAD_PARAMS['period']
@@ -42,7 +42,7 @@ class DataEngine:
             logger.error("Сбой на этапе загрузки данных. Пайплайн остановлен.")
             return
 
-        # Сохраняем сырой файл на диск
+        # Сохранение сырого файла на диск
         self.loader.save_to_parquet(df)
         logger.info("Первая фаза проекта настроена и работает автономно.")
 
@@ -61,12 +61,12 @@ class DataEngine:
         # 4. Масштабирование признаков (Scaling)
         logger.info("Запуск масштабирования ВСЕХ числовых признаков...")
 
-        # Передаем абсолютно все колонки датафрейма в скейлер
+        # Передача абсолютно всех колонок датафрейма в скейлер
         all_columns = list(df_features.columns)
         df_final = self.scaler.fit_transform(df_features, all_columns)
         logger.info(f"Масштабирование успешно применено к {len(df_final.columns)} признакам.")
 
-        # Выводим превью финального датасета в лог
+        # Вывод превью финального датасета в лог
         logger.info("Итоговая матрица признаков подготовлена. Превью датасета:\n%s", df_final.tail(3))
 
         # 5. Сохранение в итоговый Parquet-файл для нейросети
@@ -81,7 +81,7 @@ class DataEngine:
         logger.info(f"Итоговый размер матрицы данных для нейросети: {df.shape}")
 
 
-# --- АВТОНОМНЫЙ ТЕСТ ОРКЕСТРАТОРА ---
+# --- АВТОНОМНЫЙ ТЕСТ ДИСПЕТЧЕРА ДАННЫХ ---
 if __name__ == "__main__":
     from src.config import setup_logging
     setup_logging(level=logging.INFO)

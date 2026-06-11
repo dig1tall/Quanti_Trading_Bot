@@ -2,16 +2,16 @@ import logging
 from src.config import setup_logging
 from src.data_engine import DataEngine
 
-# Создаем логгер для текущего файла (main)
+# Инициализация логгера для main скрипта
 logger = logging.getLogger(__name__)
 
 def main():
-    # Инициализируем глобальные настройки логирования (вывод в консоль)
+    # Инициализация глобальной настройки логирования (вывод в консоль)
     setup_logging(level=logging.INFO)
 
     logger.info("=== Трейдинг-платформа Quanti ===")
 
-    # Создаем движок конвейера данных и запускаем его одной командой
+    # Создание диспетчера конвейера данных и запуск его
     engine = DataEngine()
     engine.run_pipeline()
 

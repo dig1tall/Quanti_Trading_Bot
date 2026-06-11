@@ -6,7 +6,7 @@ import os
 from src import config
 from src.config import FEATURE_PARAMS
 
-# Инициализируем логгер для модуля генерации фич
+# Инициализация логгера для модуля генерации фич
 logger = logging.getLogger(__name__)
 
 
@@ -16,15 +16,15 @@ class FeatureExtractor:
     Все константы по умолчанию берутся централизованно из config.py.
     """
     def __init__(self):
-        # Распаковываем конфигурацию для удобного использования в методах класса
-        self.col = FEATURE_PARAMS['target_column']
+        # Распаковка конфигурации для удобного использования в методах класса
+        self.col      = FEATURE_PARAMS['target_column']
         self.ema_fast = FEATURE_PARAMS['ema_fast_period']
         self.ema_slow = FEATURE_PARAMS['ema_slow_period']
-        self.sma_per = FEATURE_PARAMS['sma_period']
-        self.rsi_per = FEATURE_PARAMS['rsi_period']
+        self.sma_per  = FEATURE_PARAMS['sma_period']
+        self.rsi_per  = FEATURE_PARAMS['rsi_period']
         self.macd_sig = FEATURE_PARAMS['macd_signal_period']
-        self.bb_per = FEATURE_PARAMS['bb_period']
-        self.bb_std = FEATURE_PARAMS['bb_std_dev']
+        self.bb_per   = FEATURE_PARAMS['bb_period']
+        self.bb_std   = FEATURE_PARAMS['bb_std_dev']
 
     def _calculate_ema(self, df: pd.DataFrame, period: int, column: str) -> pd.Series:
         """Вычисляет Exponential Moving Average (EMA)."""
@@ -83,7 +83,7 @@ class FeatureExtractor:
             df_features[f'EMA_{self.ema_slow}'] = self._calculate_ema(df_features, self.ema_slow, self.col)
             df_features[f'SMA_{self.sma_per}'] = self._calculate_sma(df_features, self.sma_per, self.col)
 
-            # 2. Осцилляторы & ...мпульс
+            # 2. Осцилляторы & импульс
             df_features[f'RSI_{self.rsi_per}'] = self._calculate_rsi(df_features, self.rsi_per, self.col)
 
             # MACD и гистограмма (разница между линиями)
@@ -138,25 +138,25 @@ class FeatureExtractor:
 if __name__ == "__main__":
     from src.config import setup_logging
 
-    # Инициализируем логгер через конфигурацию
+    # Инициализация логгера через конфигурацию
     setup_logging(level=logging.INFO)
 
     logger.info("=== Запуск FeatureExtractor в автономном режиме ===")
 
-    # Берем путь к сырому базовому файлу цен из конфига
+    # Путь к сырому базовому файлу цен из конфига
     file_path = config.DATA_FILE_PATH
 
     if os.path.exists(file_path):
-        # Загружаем сохраненный DataLoader'ом Parquet
+        # Загрузка сохраненного DataLoader'ом Parquet
         base_df = pd.read_parquet(file_path)
         logger.info(f"Успешно загружен базовый файл: {file_path} (Размерность: {base_df.shape})")
 
-        # Прогоняем экстрактор
+        # Прогонка экстрактора
         extractor = FeatureExtractor()
         df_with_features = extractor.extract_features(base_df)
 
         print("\nПревью сгенерированных индикаторов (последние 3 строки):")
-        # Показываем только новые сгенерированные колонки, чтобы не захламлять консоль базовыми OHLCV
+        # Вывод только новых сгенерированных колонок, чтобы не захламлять консоль базовыми OHLCV
         new_cols = [col for col in df_with_features.columns if col not in base_df.columns]
         print(df_with_features[new_cols].tail(3))
     else:
