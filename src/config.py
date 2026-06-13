@@ -25,6 +25,24 @@ SCALING_PARAMS = {
     'method': 'robust'  # Допустимые: 'standard', 'minmax', 'robust'
 }
 
+# --- НАСТРОЙКИ НЕЙРОСЕТИ ---
+MODEL_PARAMS = {
+    'architecture': 'GRU',
+    'sequence_length': 30,  # Сколько свечей смотрим назад (память модели)
+    'hidden_size': 64,       # Мощность памяти скрытого слоя
+    'num_layers': 1,        # Количество слоев GRU
+    'output_size': 1        # Предсказываем 1 число
+}
+
+# --- НАСТРОЙКИ ОБУЧЕНИЯ ---
+TRAINING_PARAMS = {
+    'batch_size': 32,
+    'epochs': 50,
+    'learning_rate': 0.001,
+    'train_split': 0.8,     # 80% данных на учебу, 20% на валидацию
+    'device': 'cuda'        # Режим видеокарты
+}
+
 # --- ПУТИ К ФАЙЛАМ ---
 # __file__ — это путь к src/config.py
 # Первый dirname дает папку src/

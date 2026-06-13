@@ -62,9 +62,11 @@ class DataEngine:
         logger.info("Запуск масштабирования ВСЕХ числовых признаков...")
 
         # Передача абсолютно всех колонок датафрейма в скейлер
-        all_columns = list(df_features.columns)
+        columns_to_exclude = ['Daily_Return', 'Date', 'date']
+        all_columns = [col for col in df_features.columns if col not in columns_to_exclude]
         df_final = self.scaler.fit_transform(df_features, all_columns)
-        logger.info(f"Масштабирование успешно применено к {len(df_final.columns)} признакам.")
+        logger.info(f"Масштабирование успешно применено к {len(all_columns)} признакам. "
+                    f"Колонки {columns_to_exclude} сохранены в исходном виде.")
 
         # Вывод превью финального датасета в лог
         logger.info("Итоговая матрица признаков подготовлена. Превью датасета:\n%s", df_final.tail(3))
