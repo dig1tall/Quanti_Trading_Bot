@@ -43,6 +43,7 @@ def train_model():
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=TRAINING_PARAMS['learning_rate'])
 
+    # Количество полных циклов (проходов) по датасету
     epochs = TRAINING_PARAMS['epochs']
 
     # Настройки Early Stopping
@@ -56,28 +57,28 @@ def train_model():
     # 5. Главный цикл обучения
     for epoch in range(1, epochs + 1):
         # --- ФАЗА ТРЕНИРОВКИ ---
-        model.train()
+        model.train()   # Режим обучения
         train_loss = 0.0
 
         for X_batch, y_batch in train_loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device) # Перенос RAM -> VRAM
 
-            optimizer.zero_grad()
-            predictions = model(X_batch)
-            loss = criterion(predictions, y_batch)
-            loss.backward()
-            optimizer.step()
+            optimizer.zero_grad()                       # Обнуление прошлых градиентов
+            predictions = model(X_batch)                # Получение предсказаний от модели
+            loss = criterion(predictions, y_batch)      # Подсчет потерь (MSE), относительно предикативного столбца Y
+            loss.backward()     # Прогонка ошибки к начальному слою. Расчет градиентов всех нейронов
+            optimizer.step()    # Корректировка весов
 
-            train_loss += loss.item() * X_batch.size(0)
+            train_loss += loss.item() * X_batch.size(0)     # Подсчет ошибки всего батча
 
-        train_loss /= len(train_loader.dataset)
+        train_loss /= len(train_loader.dataset)             # Средняя ошибка на одну свечу, за всю эпоху
 
         # --- ФАЗА ВАЛИДАЦИИ ---
-        model.eval()
+        model.eval()    # Режим валидации
         val_loss = 0.0
 
-        with torch.no_grad():
-            for X_batch, y_batch in val_loader:
+        with torch.no_grad():       # Отключение подсчета градиентов для валидации
+            for X_batch, y_batch in val_loader:     # Аналогично как train loop, без изменения весов
                 X_batch, y_batch = X_batch.to(device), y_batch.to(device)
                 predictions = model(X_batch)
                 loss = criterion(predictions, y_batch)
