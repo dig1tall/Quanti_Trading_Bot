@@ -5,7 +5,7 @@ import logging
 DATA_LOAD_PARAMS = {
     'ticker': "BTC-USD",# ticker (Тикер) — это краткое уникальное название актива на бирже.
     'interval': "1d",   # interval (Таймфрейм) — это размер одной свечи (одной строчки в таблице).
-    'period': "2y"
+    'period': "5y"
 }
 
 # --- НАСТРОЙКИ ГЕНЕРАЦИИ ПРИЗНАКОВ (Feature Engineering) ---

@@ -2,7 +2,7 @@ import logging
 import torch
 import torch.nn as nn
 # Импортируем параметры и функцию настройки логирования из твоего конфигурационного файла
-from config import MODEL_PARAMS, TRAINING_PARAMS, setup_logging
+from src.config import MODEL_PARAMS, TRAINING_PARAMS, setup_logging
 
 # Инициализируем логер для текущего файла
 logger = logging.getLogger(__name__)
