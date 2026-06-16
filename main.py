@@ -31,15 +31,14 @@ def main():
     # --- ФАЗА 2: Обучение Модели ---
     if RUN_MODEL_TRAINING:
         logger.info("[ФАЗА 2] Запуск обучения нейросети QuantiGRU...")
-        # Передаем patience=7 для Early Stopping
-        model_engine.train_pipeline(patience=7)
+        model_engine.run_training()
     else:
         logger.info("[ФАЗА 2] Пропуск этапа обучения сети.")
 
     # --- ФАЗА 3: Бэктестинг и Аналитика ---
     if RUN_BACKTESTING:
         logger.info("[ФАЗА 3] Симуляция торговой стратегии на исторических данных...")
-        model_engine.backtest_pipeline()
+        model_engine.run_backtest()
 
     logger.info("==================================================")
     logger.info("   РАБОТА ВСЕХ СИСТЕМ QUANTIPY ЗАВЕРШЕНА    ")

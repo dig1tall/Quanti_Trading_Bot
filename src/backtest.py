@@ -40,7 +40,7 @@ def run_backtest():
         logger.error(f"Файл весов {model_path} не найден! Сначала обучи модель через train.py")
         return
 
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.eval()
     logger.info("Веса лучшей модели успешно загружены. Запуск симуляции...")
 
