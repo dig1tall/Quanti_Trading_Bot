@@ -32,46 +32,54 @@ class DataEngine:
         self.scaler = Scaler(method=self.method)
 
     def run_pipeline(self) -> None:
-        """Запускает полный цикл: загрузка -> сохранение сырых -> валидация -> фичи -> скейлинг -> сохранение финала."""
+        """Запускает полный цикл с раздельным масштабированием во избежание утечки данных."""
         logger.info("=== Запуск конвейера данных через DataEngine ===")
 
-        # 1. Запуск загрузчика в память
         df = self.loader.download_crypto_data()
-
         if df.empty:
             logger.error("Сбой на этапе загрузки данных. Пайплайн остановлен.")
             return
 
-        # Сохранение сырого файла на диск
         self.loader.save_to_parquet(df)
         logger.info("Первая фаза проекта настроена и работает автономно.")
 
-        # 2. Валидация датасета
         logger.info("Запуск валидатора целостности данных...")
         self.validator.validate_dataset(df)
 
-        # 3. Генерация признаков (фич)
         logger.info("Запуск генерации математических признаков (ML-пайплайн)...")
         df_features = self.extractor.extract_features(df)
-
         if df_features.empty:
             logger.error("Сбой на этапе генерации признаков. Пайплайн остановлен.")
             return
 
-        # 4. Масштабирование признаков (Scaling)
-        logger.info("Запуск масштабирования ВСЕХ числовых признаков...")
+        # ---- ПРАВИЛЬНЫЙ РАЗДЕЛЬНЫЙ СКЕЙЛИНГ ----
+        logger.info("Разделение данных для честного масштабирования...")
 
-        # Передача абсолютно всех колонок датафрейма в скейлер
+        # Загружаем train_split из конфига обучения (или берем 0.8 по умолчанию)
+        from src.config import TRAINING_PARAMS
+        train_split = TRAINING_PARAMS.get('train_split', 0.8)
+
+        # Хронологический раскол матрицы фич
+        split_idx = int(len(df_features) * train_split)
+        df_train = df_features.iloc[:split_idx].copy()
+        df_val = df_features.iloc[split_idx:].copy()
+
         columns_to_exclude = ['Daily_Return', 'Date', 'date']
         all_columns = [col for col in df_features.columns if col not in columns_to_exclude]
-        df_final = self.scaler.fit_transform(df_features, all_columns)
-        logger.info(f"Масштабирование успешно применено к {len(all_columns)} признакам. "
-                    f"Колонки {columns_to_exclude} сохранены в исходном виде.")
 
-        # Вывод превью финального датасета в лог
+        # Обучаем скейлер ТОЛЬКО на Train
+        self.scaler.fit(df_train, all_columns)
+
+        # Трансформируем обе выборки независимо на основе параметров Train
+        df_train_scaled = self.scaler.transform(df_train)
+        df_val_scaled = self.scaler.transform(df_val)
+
+        # Соединяем обратно в единый датасет для сохранения
+        df_final = pd.concat([df_train_scaled, df_val_scaled], axis=0)
+
+        logger.info(f"Масштабирование успешно применено. Train={len(df_train_scaled)} строк, Val={len(df_val_scaled)} строк.")
         logger.info("Итоговая матрица признаков подготовлена. Превью датасета:\n%s", df_final.tail(3))
 
-        # 5. Сохранение в итоговый Parquet-файл для нейросети
         self._save_features(df_final)
 
     def _save_features(self, df: pd.DataFrame) -> None:

@@ -132,8 +132,8 @@ class FeatureExtractor:
 
     def extract_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Расширенный конвейер генерации признаков с валидацией аномалий.
-        Все константы берутся централизованно из config.py.
+        Модернизированный конвейер генерации признаков.
+        Исключает абсолютные цены из матрицы признаков для предотвращения утечки данных (Data Leakage).
         """
         initial_rows = len(df)
         logger.info("Запуск Feature Engineering пайплайна...")
@@ -141,75 +141,75 @@ class FeatureExtractor:
         try:
             df_features = df.copy()
 
+            # Базовые колонки, которые мы сохраним для бэктеста, но удалим из X перед моделью
+            # Считаем Daily_Return в самом начале, так как теперь он — основа всего
+            df_features['Daily_Return'] = df_features[self.col].pct_change().fillna(0)
+
             logger.info(
-                f"Конфигурация фич: Target={self.col}, EMA({self.ema_fast}/{self.ema_slow}), "
+                f"Конфигурация фич (на базе Returns): EMA({self.ema_fast}/{self.ema_slow}), "
                 f"SMA={self.sma_per}, RSI={self.rsi_per}, MACD_Signal={self.macd_sig}, BB({self.bb_per}, {self.bb_std}), "
                 f"ADX_Per={self.adx_per}, OBV_Win={self.obv_window}, Chaikin_Win={self.chaikin_window}"
             )
 
-            # 1. Трендовые индикаторы (База)
-            df_features[f'EMA_{self.ema_fast}'] = self._calculate_ema(df_features, self.ema_fast, self.col)
-            df_features[f'EMA_{self.ema_slow}'] = self._calculate_ema(df_features, self.ema_slow, self.col)
-            df_features[f'SMA_{self.sma_per}'] = self._calculate_sma(df_features, self.sma_per, self.col)
+            # 1. Трендовые индикаторы доходностей (теперь они колеблются около нуля!)
+            df_features[f'EMA_{self.ema_fast}'] = self._calculate_ema(df_features, self.ema_fast, 'Daily_Return')
+            df_features[f'EMA_{self.ema_slow}'] = self._calculate_ema(df_features, self.ema_slow, 'Daily_Return')
+            df_features[f'SMA_{self.sma_per}'] = self._calculate_sma(df_features, self.sma_per, 'Daily_Return')
 
-            # 2. Осцилляторы & импульс
-            df_features[f'RSI_{self.rsi_per}'] = self._calculate_rsi(df_features, self.rsi_per, self.col)
+            # 2. Осцилляторы & импульс (RSI от доходностей работает как нормированный импульс)
+            df_features[f'RSI_{self.rsi_per}'] = self._calculate_rsi(df_features, self.rsi_per, 'Daily_Return')
 
-            # MACD и гистограмма (разница между линиями)
-            macd, signal = self._calculate_macd(df_features, self.ema_fast, self.ema_slow, self.macd_sig, self.col)
+            # MACD доходностей
+            macd, signal = self._calculate_macd(df_features, self.ema_fast, self.ema_slow, self.macd_sig, 'Daily_Return')
             df_features['MACD'] = macd
             df_features['MACD_Signal'] = signal
             df_features['MACD_Hist'] = macd - signal
 
-            # 3. Волатильность & Границы (Bollinger Bands)
-            upper, lower = self._calculate_bollinger_bands(df_features, self.bb_per, self.bb_std, self.col)
-            # Относительное положение цены внутри полос (от 0 до 1) — идеально для нейросетей
-            df_features['BB_Position'] = (df_features[self.col] - lower) / (upper - lower)
+            # 3. Волатильность & Границы (Bollinger Bands строим вокруг доходностей)
+            upper, lower = self._calculate_bollinger_bands(df_features, self.bb_per, self.bb_std, 'Daily_Return')
+            df_features['BB_Position'] = (df_features['Daily_Return'] - lower) / (upper - lower).replace(0, 1e-8)
             df_features['BB_Position'] = df_features['BB_Position'].fillna(0.5)
 
-            # 4. Относительные фичи
+            # 4. Относительные фичи доходностей
             df_features['EMA_spread'] = df_features[f'EMA_{self.ema_fast}'] - df_features[f'EMA_{self.ema_slow}']
-            df_features['Price_to_SMA'] = df_features[self.col] / df_features[f'SMA_{self.sma_per}']
 
-            # 5. Доходность и Волатильность
-            df_features['Daily_Return'] = df_features[self.col].pct_change().fillna(0)
+            # 5. Историческая волатильность
             df_features['Volatility'] = df_features['Daily_Return'].rolling(window=self.sma_per).std().fillna(0)
 
-            # 6. ТРЕЙДИНГОВЫЕ ОБЪЕМЫ И СИЛА ТРЕНДА (Новый блок для прокачки GRU)
+            # 6. Трейдинговые объемы и Сила тренда
             vol_column = 'Volume' if 'Volume' in df_features.columns else 'volume'
 
-            # Считаем OBV (использует self.obv_window из конфига)
+            # OBV и Чайкин считаем по классике от Close, но нормируем их изменения
             raw_obv = self._calculate_obv(df_features, self.col, vol_column)
-            df_features['OBV_Slope'] = raw_obv.pct_change(periods=5).fillna(0) # Скорость изменения OBV
+            df_features['OBV_Slope'] = raw_obv.pct_change(periods=5).fillna(0).replace([np.inf, -np.inf], 0)
 
-            # Чайкин (использует self.chaikin_window из конфига)
             df_features['Chaikin_Osc'] = self._calculate_chaikin_oscillator(df_features, self.col, vol_column)
 
-            # Сила тренда (ADX) — теперь жестко использует свой параметр self.adx_per из конфига
+            # Сила тренда (ADX)
             df_features['Trend_Strength'] = self._calculate_adx_simplified(df_features, self.adx_per, self.col)
             df_features['Trend_Strength'] = df_features['Trend_Strength'].fillna(0)
 
-            # --- БЛОК ЗАЩИТЫ И ВАЛИДАЦИИ ФИЧ ---
+            # --- ЖЕСТКАЯ ЗАЧИСТКА АБСОЛЮТНЫХ ЦЕН (Защита от подглядывания) ---
+            # Удаляем сырые ценовые колонки из датасета фич, чтобы они физически не попали в X модели
+            # Примечание: Мы НЕ удаляем Daily_Return, так как он нужен для y_target в датасете
+            cols_to_drop = ['Open', 'High', 'Low', 'Close', 'Volume', 'volume']
+            cols_to_drop = [c for c in cols_to_drop if c in df_features.columns]
+            df_features = df_features.drop(columns=cols_to_drop)
 
             # Проверка на бесконечные значения (inf)
             inf_counts = np.isinf(df_features).sum().sum()
             if inf_counts > 0:
                 logger.warning(f"Обнаружено {inf_counts} значений +/- c бесконечностью (inf). Производится замена на корректные числа.")
-                df_features = df_features.replace([np.inf, -np.inf], np.nan)
+                df_features = df_features.replace([np.inf, -np.inf], 0)
 
             # Дропаем временные NaN, возникшие из-за rolling-окон
             df_clean = df_features.dropna()
             dropped_rows = initial_rows - len(df_clean)
 
-            if len(df_clean) == 0:
-                logger.warning("После удаления NaN матрица признаков пуста! Проверь длину истории или периоды скользящих окон.")
-            elif len(df_clean) < 100:
-                logger.warning(f"Критически мало данных для обучения модели после расчета фич: всего {len(df_clean)} строк.")
-            else:
-                logger.info(
-                    f"Генерация фич завершена успешно. Удалено строк с NaN: {dropped_rows}. "
-                    f"Строк на выходе: {len(df_clean)}"
-                )
+            logger.info(
+                f"Генерация фич завершена успешно. Удалено ценовых колонок: {cols_to_drop}. "
+                f"Удалено строк с NaN: {dropped_rows}. Строк на выходе: {len(df_clean)}"
+            )
 
             return df_clean
 

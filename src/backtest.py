@@ -61,52 +61,70 @@ def run_backtest():
     preds = np.array(all_preds)
     targets = np.array(all_targets)
 
-    # 4. ПОДГОТОВКА ДАННЫХ ДЛЯ VECTORBT
-    # Загружаем базовый файл с сырыми, не отскейленными ценами в долларах
+    # 4. ПОДГОТОВКА ДАННЫХ ДЛЯ VECTORBT (Синхронизация по датам)
+    # Загружаем базовый файл с сырыми ценами и обязательно ставим дату в индекс, как в датасете
     df_raw = pd.read_parquet(DATA_FILE_PATH)
+    for date_col in ['Date', 'date']:
+        if date_col in df_raw.columns:
+            df_raw.set_index(date_col, inplace=True)
+    df_raw = df_raw.sort_index()
 
-    # Вычисляем точную длину валидационной выборки, учитывая сдвиг на sequence_length
-    val_size = len(targets) # Берем точно по размеру собранных таргетов
+    # Загружаем итоговый файл фич, чтобы узнать точные даты валидационного окна
+    df_features_file = pd.read_parquet(FEATURES_FILE_PATH)
+    for date_col in ['Date', 'date']:
+        if date_col in df_features_file.columns:
+            df_features_file.set_index(date_col, inplace=True)
+    df_features_file = df_features_file.sort_index()
 
-    # Вырезаем цены закрытия, которые соответствуют валидационным прогнозам
-    val_close = df_raw['Close'].iloc[-val_size:].reset_index(drop=True)
+    # Вычисляем точный срез индексов дат, которые попали в валидацию
+    # CryptoDataset отрезает sequence_length окон с начала выборки
+    total_samples = len(df_features_file) - MODEL_PARAMS['sequence_length']
+    train_size = int(total_samples * TRAINING_PARAMS['train_split'])
+
+    # Индексы валидации начинаются после train_size + sequence_length
+    val_start_idx = train_size + MODEL_PARAMS['sequence_length']
+    val_dates = df_features_file.index[val_start_idx : val_start_idx + len(targets)]
+
+    # Вытаскиваем цены закрытия строго по этим датам
+    val_close = df_raw.loc[val_dates, 'Close'].reset_index(drop=True)
+    logger.info(f"Цены для VectorBT успешно синхронизированы по датам. Период: с {val_dates[0]} по {val_dates[-1]}")
 
     # 5. ГЕНЕРАЦИЯ СИГНАЛОВ (Включая Шорты!)
     # Задаем порог уверенности. Подбирается экспериментально (например, 0.002 = 0.2%)
     threshold = BACKTEST_PARAMS['threshold']
-    # Векторизованная логика:
-    # Если прогноз > 0 -> 1 (Long)
-    # Если прогноз < 0 -> -1 (Short)
+
     signals = np.zeros_like(preds)
     signals[preds > threshold] = 1
     signals[preds < -threshold] = -1
 
-    # Превращаем в Pandas Series, чтобы VectorBT подтянул правильные индексы
+    # Превращаем в Pandas Series
     signals_series = pd.Series(signals, name='Quanti_Signals')
 
     # 6. МАГИЯ VECTORBT: ЗАПУСК СИМУЛЯЦИИ ПОРТФЕЛЯ
     logger.info("Запуск движка симуляции VectorBT Portfolio...")
 
-    # Вход в лонг — когда сигнал 1. Выход из лонга — когда сигнал стал 0 или -1.
+    # Вход в LONG, когда модель уверена в росте (1)
     entries = signals_series == 1
-    exits = signals_series <= 0
+    exits = signals_series == -1
 
-    # Вход в шорт — когда сигнал -1. Выход из шорта — когда сигнал стал 0 или 1.
+    # Вход в SHORT, когда модель уверена в падении (-1)
     short_entries = signals_series == -1
-    short_exits = signals_series >= 0
+    short_exits = signals_series == 1
 
-    # Задаем комиссию биржи (например, 0.06% за сделку — стандарт для Binance Futures Taker)
+    # Вытаскиваем все параметры из BACKTEST_PARAMS
     fee_rate = BACKTEST_PARAMS['fee_rate']
+    init_cash = BACKTEST_PARAMS['init_cash']
+    freq = BACKTEST_PARAMS['freq']
 
     portfolio = vbt.Portfolio.from_signals(
         close=val_close,
-        entries=entries,                # Сигналы на открытие LONG
-        exits=exits,                    # Выход из LONG совпадает со входом в SHORT
-        short_entries=short_entries,    # Сигналы на открытие SHORT
-        short_exits=short_exits,        # Выход из SHORT совпадает со входом в LONG
-        init_cash=10000.0,              # Стартовый депозит в $
-        fees=fee_rate,                  # Учитываем комиссии
-        freq='1D'                       # Частота данных
+        entries=entries,
+        exits=exits,
+        short_entries=short_entries,
+        short_exits=short_exits,
+        init_cash=init_cash,            # Теперь берется из конфига
+        fees=fee_rate,                  # Из конфига
+        freq=freq                       # Теперь берется из конфига ('1D')
     )
 
     # 7. РАСЧЕТ И ВЫВОД МЕТРИК
@@ -119,20 +137,23 @@ def run_backtest():
     # Печатаем весь дашборд VectorBT целиком без риска словить KeyError
     logger.info(f"\n{portfolio.stats().to_string()}")
 
-    # 8. СОХРАНЕНИЕ ГРАФИКА (Опционально)
-"""    reports_dir = os.path.join(PROJECT_ROOT, "reports")
-    os.makedirs(reports_dir, exist_ok=True)
+    # 8. СОХРАНЕНИЕ ГРАФИКА
+    if BACKTEST_PARAMS.get('save_plots', False):
+        reports_dir = os.path.join(PROJECT_ROOT, "reports")
+        os.makedirs(reports_dir, exist_ok=True)
 
-    # Формируем имя файла: дата_время (например: 2026-06-17_20-35)
-    current_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    report_filename = f"backtest_{current_time}.html"
-    report_path = os.path.join(reports_dir, report_filename)
+        # Формируем имя файла: дата_время (например: 2026-06-18_01-47)
+        current_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        report_filename = f"backtest_{current_time}.html"
+        report_path = os.path.join(reports_dir, report_filename)
 
-    # Генерируем и сохраняем интерактивный Plotly график
-    fig = portfolio.plot()
-    fig.write_html(report_path)
+        # Генерируем и сохраняем интерактивный Plotly график
+        fig = portfolio.plot()
+        fig.write_html(report_path)
 
-    logger.info(f"Интерактивный график бэктеста успешно сохранен в: reports/{report_filename}")"""
+        logger.info(f"Интерактивный график бэктеста успешно сохранен в: reports/{report_filename}")
+    else:
+        logger.info("Сохранение графиков отключено в конфиге (save_plots=False).")
 
 if __name__ == "__main__":
     from src.config import setup_logging

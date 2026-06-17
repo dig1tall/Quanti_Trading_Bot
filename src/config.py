@@ -3,8 +3,8 @@ import logging
 
 # --- НАСТРОЙКИ ЗАГРУЗКИ ДАННЫХ ---
 DATA_LOAD_PARAMS = {
-    'ticker': "BTC-USD",# ticker (Тикер) — это краткое уникальное название актива на бирже.
-    'interval': "1d",   # interval (Таймфрейм) — это размер одной свечи (одной строчки в таблице).
+    'ticker': "BTC-USD",  # ticker (Тикер) — это краткое уникальное название актива на бирже.
+    'interval': "1d",     # interval (Таймфрейм) — это размер одной свечи (одной строчки в таблице).
     'period': "5y"
 }
 
@@ -47,15 +47,17 @@ TRAINING_PARAMS = {
     'device': 'cuda',        # Режим видеокарты
     'patience': 7           # Ожидание Early Stopping
 }
-# --- НАСТРОЙКИ БЭКТЕСТОВ ---
+
+# --- НАСТРОЙКИ БЭКТЕСТОВ (Автоматически синхронизированы с DATA_LOAD_PARAMS) ---
 BACKTEST_PARAMS = {
-    'threshold': 0.0015,
-    'fee_rate': 0.0006
+    'init_cash': 10000.0,      # Стартовый депозит в долларах
+    'threshold': 0.005,        # Порог уверенности (для изменения цен/доходностей)
+    'fee_rate': 0.0006,        # Комиссия за сделку (0.06% — стандарт Binance Futures)
+    'freq': DATA_LOAD_PARAMS['interval'].upper(),
+    'save_plots': False         # Флаг: сохранять ли интерактивный HTML-отчет Plotly
 }
+
 # --- ПУТИ К ФАЙЛАМ ---
-# __file__ — это путь к src/config.py
-# Первый dirname дает папку src/
-# Второй dirname выводит нас в корень Quanti/
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
@@ -67,7 +69,6 @@ DATA_FILE_PATH = os.path.join(DATA_DIR, DATA_FILE_NAME)
 CLEAN_TICKER = DATA_LOAD_PARAMS['ticker'].replace('-', '_')
 FEATURES_FILE_NAME = f"{CLEAN_TICKER}_{DATA_LOAD_PARAMS['interval']}_features.parquet"
 FEATURES_FILE_PATH = os.path.join(DATA_DIR, FEATURES_FILE_NAME)
-
 
 # --- НАСТРОЙКИ ЛОГИРОВАНИЯ ---
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -81,7 +82,5 @@ def setup_logging(level=logging.INFO):
         datefmt=LOG_DATE_FORMAT,
         handlers=[
             logging.StreamHandler() # Вывод в консоль
-            # В будущем сюда можно легко добавить вывод в файл:
-            # logging.FileHandler(os.path.join(PROJECT_ROOT, "quanti.log"))
         ]
     )
