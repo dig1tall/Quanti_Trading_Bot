@@ -6,7 +6,7 @@ import pandas as pd
 import vectorbt as vbt
 from datetime import datetime
 
-from src.config import MODEL_PARAMS, TRAINING_PARAMS, FEATURES_FILE_PATH, PROJECT_ROOT, DATA_FILE_PATH
+from src.config import MODEL_PARAMS, TRAINING_PARAMS, FEATURES_FILE_PATH, PROJECT_ROOT, DATA_FILE_PATH, BACKTEST_PARAMS
 from src.dataset import get_data_loaders
 from src.model import QuantiGRU
 
@@ -73,7 +73,7 @@ def run_backtest():
 
     # 5. ГЕНЕРАЦИЯ СИГНАЛОВ (Включая Шорты!)
     # Задаем порог уверенности. Подбирается экспериментально (например, 0.002 = 0.2%)
-    threshold = 0.0015
+    threshold = BACKTEST_PARAMS['threshold']
     # Векторизованная логика:
     # Если прогноз > 0 -> 1 (Long)
     # Если прогноз < 0 -> -1 (Short)
@@ -96,7 +96,7 @@ def run_backtest():
     short_exits = signals_series >= 0
 
     # Задаем комиссию биржи (например, 0.06% за сделку — стандарт для Binance Futures Taker)
-    fee_rate = 0.0006
+    fee_rate = BACKTEST_PARAMS['fee_rate']
 
     portfolio = vbt.Portfolio.from_signals(
         close=val_close,
@@ -120,7 +120,7 @@ def run_backtest():
     logger.info(f"\n{portfolio.stats().to_string()}")
 
     # 8. СОХРАНЕНИЕ ГРАФИКА (Опционально)
-    reports_dir = os.path.join(PROJECT_ROOT, "reports")
+"""    reports_dir = os.path.join(PROJECT_ROOT, "reports")
     os.makedirs(reports_dir, exist_ok=True)
 
     # Формируем имя файла: дата_время (например: 2026-06-17_20-35)
@@ -132,7 +132,7 @@ def run_backtest():
     fig = portfolio.plot()
     fig.write_html(report_path)
 
-    logger.info(f"Интерактивный график бэктеста успешно сохранен в: reports/{report_filename}")
+    logger.info(f"Интерактивный график бэктеста успешно сохранен в: reports/{report_filename}")"""
 
 if __name__ == "__main__":
     from src.config import setup_logging

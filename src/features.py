@@ -25,6 +25,9 @@ class FeatureExtractor:
         self.macd_sig = FEATURE_PARAMS['macd_signal_period']
         self.bb_per   = FEATURE_PARAMS['bb_period']
         self.bb_std   = FEATURE_PARAMS['bb_std_dev']
+        self.adx_per        = FEATURE_PARAMS['adx_period']
+        self.obv_window     = FEATURE_PARAMS['obv_rolling_window']
+        self.chaikin_window = FEATURE_PARAMS['chaikin_rolling_window']
 
     def _calculate_ema(self, df: pd.DataFrame, period: int, column: str) -> pd.Series:
         """Вычисляет Exponential Moving Average (EMA)."""
@@ -63,55 +66,68 @@ class FeatureExtractor:
         return upper_band, lower_band
 
     def _calculate_obv(self, df: pd.DataFrame, price_col: str, vol_col: str) -> pd.Series:
-        """Вычисляет On-Balance Volume (OBV)."""
+        """Безопасный On-Balance Volume (изменение за окно, без бесконечного cumsum)."""
         direction = np.sign(df[price_col].diff()).fillna(0)
-        obv = (direction * df[vol_col]).cumsum()
-        return obv
+        # Динамически используем окно из конфигурации
+        obv_window = (direction * df[vol_col]).rolling(window=self.obv_window).sum().fillna(0)
+        return obv_window
 
     def _calculate_chaikin_oscillator(self, df: pd.DataFrame, price_col: str, vol_col: str) -> pd.Series:
-        """Вычисляет Упрощенный Осциллятор Чайкина (Chaikin Oscillator)."""
-        # Рассчитываем Money Flow Multiplier
+        """Безопасный и нормированный Осциллятор Чайкина."""
         close = df[price_col]
         high = df['High']
         low = df['Low']
         vol = df[vol_col]
 
-        # Защита от деления на ноль, если High == Low
         denom = (high - low).replace(0, 1e-8)
         mf_multiplier = ((close - low) - (high - close)) / denom
         mf_volume = mf_multiplier * vol
-        ad_line = mf_volume.cumsum()
 
-        # Разница между быстрой и медленной EMA от линии AD
-        chaikin = ad_line.ewm(span=3, adjust=False).mean() - ad_line.ewm(span=10, adjust=False).mean()
+        # Динамически используем окно накопления денег из конфигурации
+        ad_volume_window = mf_volume.rolling(window=self.chaikin_window).sum().fillna(0)
+
+        # Разница EMA от нормированного окна
+        chaikin = ad_volume_window.ewm(span=3, adjust=False).mean() - ad_volume_window.ewm(span=10, adjust=False).mean()
         return chaikin
 
     def _calculate_adx_simplified(self, df: pd.DataFrame, period: int, price_col: str) -> pd.Series:
-        """Вычисляет упрощенную силу тренда (аналог ADX) с сохранением исходного индекса."""
+        """
+        Вычисляет упрощенную силу тренда (аналог ADX) с жестким сохранением исходного индекса дат.
+        Защищен от неявного приведения типов в numpy.ndarray и деления на ноль.
+        """
         high = df['High']
         low = df['Low']
-        close = df[price_col]
 
-        # Направленные движения
+        # 1. Направленные движения (дифференциалы)
         up_move = high.diff()
         down_move = low.diff()
 
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        # np.where возвращает голый массив numpy — сразу заворачиваем в Series с нужным индексом
+        plus_dm = pd.Series(
+            np.where((up_move > down_move) & (up_move > 0), up_move, 0),
+            index=df.index
+        )
+        minus_dm = pd.Series(
+            np.where((down_move > up_move) & (down_move > 0), down_move, 0),
+            index=df.index
+        )
 
-        # Создаем Series с правильным индексом, чтобы ewm не ломал даты
-        plus_dm_series = pd.Series(plus_dm, index=df.index)
-        minus_dm_series = pd.Series(minus_dm, index=df.index)
+        # 2. Сглаживание направлений через EMA
+        plus_di = plus_dm.ewm(span=period, adjust=False).mean()
+        minus_di = minus_dm.ewm(span=period, adjust=False).mean()
 
-        # Сглаживание через EMA
-        plus_di = plus_dm_series.ewm(span=period, adjust=False).mean()
-        minus_di = minus_dm_series.ewm(span=period, adjust=False).mean()
-
+        # 3. Расчет базового индекса направления (DX)
         denom = (plus_di + minus_di).replace(0, 1e-8)
-        dx = (np.abs(plus_di - minus_di) / denom) * 100
 
-        # Финальный ADX с сохранением индекса
-        adx = dx.ewm(span=period, adjust=False).mean()
+        # Чтобы np.abs() не сбросил Series в ndarray, используем встроенный метод .abs() от Pandas
+        raw_dx = ((plus_di - minus_di).abs() / denom) * 100
+
+        # На всякий случай жестко контролируем, что dx остался Series с индексом
+        dx_series = pd.Series(raw_dx, index=df.index)
+
+        # 4. Финальное сглаживание — получаем итоговую силу тренда (ADX)
+        adx = dx_series.ewm(span=period, adjust=False).mean()
+
         return adx
 
     def extract_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -127,7 +143,8 @@ class FeatureExtractor:
 
             logger.info(
                 f"Конфигурация фич: Target={self.col}, EMA({self.ema_fast}/{self.ema_slow}), "
-                f"SMA={self.sma_per}, RSI={self.rsi_per}, MACD_Signal={self.macd_sig}, BB({self.bb_per}, {self.bb_std})"
+                f"SMA={self.sma_per}, RSI={self.rsi_per}, MACD_Signal={self.macd_sig}, BB({self.bb_per}, {self.bb_std}), "
+                f"ADX_Per={self.adx_per}, OBV_Win={self.obv_window}, Chaikin_Win={self.chaikin_window}"
             )
 
             # 1. Трендовые индикаторы (База)
@@ -159,18 +176,17 @@ class FeatureExtractor:
             df_features['Volatility'] = df_features['Daily_Return'].rolling(window=self.sma_per).std().fillna(0)
 
             # 6. ТРЕЙДИНГОВЫЕ ОБЪЕМЫ И СИЛА ТРЕНДА (Новый блок для прокачки GRU)
-            # Предполагаем, что колонка объема называется 'Volume'
             vol_column = 'Volume' if 'Volume' in df_features.columns else 'volume'
 
-            # Считаем OBV и сразу делим на скользящее среднее объема, чтобы скейлеру было проще
+            # Считаем OBV (использует self.obv_window из конфига)
             raw_obv = self._calculate_obv(df_features, self.col, vol_column)
             df_features['OBV_Slope'] = raw_obv.pct_change(periods=5).fillna(0) # Скорость изменения OBV
 
-            # Чайкин
+            # Чайкин (использует self.chaikin_window из конфига)
             df_features['Chaikin_Osc'] = self._calculate_chaikin_oscillator(df_features, self.col, vol_column)
 
-            # Сила тренда (ADX)
-            df_features['Trend_Strength'] = self._calculate_adx_simplified(df_features, self.sma_per, self.col)
+            # Сила тренда (ADX) — теперь жестко использует свой параметр self.adx_per из конфига
+            df_features['Trend_Strength'] = self._calculate_adx_simplified(df_features, self.adx_per, self.col)
             df_features['Trend_Strength'] = df_features['Trend_Strength'].fillna(0)
 
             # --- БЛОК ЗАЩИТЫ И ВАЛИДАЦИИ ФИЧ ---

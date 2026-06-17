@@ -27,17 +27,18 @@ def train_model():
 
     # Автоматически определяем количество фич по первому батчу
     X_sample, _ = next(iter(train_loader))
-    input_size = X_sample.shape[2] # Это число 17
+    input_size = X_sample.shape[2]
 
-    # 3. Инициализируем модель и переносим её на устройство
+    # 3. Инициализируем модель с поддержкой Dropout из конфига
     model = QuantiGRU(
         input_size=input_size,
         hidden_size=MODEL_PARAMS['hidden_size'],
         num_layers=MODEL_PARAMS['num_layers'],
-        output_size=MODEL_PARAMS['output_size']
+        output_size=MODEL_PARAMS['output_size'],
+        dropout_rate=MODEL_PARAMS['dropout_rate']
     ).to(device)
 
-    logger.info(f"Архитектура модели инициализирована: {MODEL_PARAMS['architecture']}")
+    logger.info(f"Архитектура модели инициализирована: {MODEL_PARAMS['architecture']} (Dropout: {MODEL_PARAMS['dropout_rate']})")
 
     # 4. Функция потерь (MSE для регрессии) и Оптимизатор
     criterion = nn.MSELoss()
@@ -48,7 +49,7 @@ def train_model():
 
     # Настройки Early Stopping
     best_val_loss = float('inf')
-    patience = 7  # Сколько эпох ждем улучшения Val Loss перед остановкой
+    patience = TRAINING_PARAMS['patience']  # Сколько эпох ждем улучшения Val Loss перед остановкой
     patience_counter = 0
     best_epoch = 0
 
@@ -57,7 +58,7 @@ def train_model():
     # 5. Главный цикл обучения
     for epoch in range(1, epochs + 1):
         # --- ФАЗА ТРЕНИРОВКИ ---
-        model.train()   # Режим обучения
+        model.train()   # Режим обучения (Дропаут активно режет связи)
         train_loss = 0.0
 
         for X_batch, y_batch in train_loader:
@@ -65,20 +66,20 @@ def train_model():
 
             optimizer.zero_grad()                       # Обнуление прошлых градиентов
             predictions = model(X_batch)                # Получение предсказаний от модели
-            loss = criterion(predictions, y_batch)      # Подсчет потерь (MSE), относительно предикативного столбца Y
-            loss.backward()     # Прогонка ошибки к начальному слою. Расчет градиентов всех нейронов
+            loss = criterion(predictions, y_batch)      # Подсчет потерь (MSE)
+            loss.backward()     # Расчет градиентов
             optimizer.step()    # Корректировка весов
 
             train_loss += loss.item() * X_batch.size(0)     # Подсчет ошибки всего батча
 
-        train_loss /= len(train_loader.dataset)             # Средняя ошибка на одну свечу, за всю эпоху
+        train_loss /= len(train_loader.dataset)             # Средняя ошибка на одну свечу
 
         # --- ФАЗА ВАЛИДАЦИИ ---
-        model.eval()    # Режим валидации
+        model.eval()    # Режим валидации (Дропаут замораживается, веса работают на полную)
         val_loss = 0.0
 
-        with torch.no_grad():       # Отключение подсчета градиентов для валидации
-            for X_batch, y_batch in val_loader:     # Аналогично как train loop, без изменения весов
+        with torch.no_grad():
+            for X_batch, y_batch in val_loader:
                 X_batch, y_batch = X_batch.to(device), y_batch.to(device)
                 predictions = model(X_batch)
                 loss = criterion(predictions, y_batch)
@@ -105,7 +106,7 @@ def train_model():
 
         # Условие ранней остановки
         if patience_counter >= patience:
-            logger.warning(f" Early Stopping сработал на эпохе {epoch}! Ошибка на валидации не падала {patience} эпох подряд.")
+            logger.warning(f" Early Stopping сработал на epoch {epoch}! Ошибка на валидации не падала {patience} эпох подряд.")
             break
 
     logger.info(f"=== Обучение завершено! ===")

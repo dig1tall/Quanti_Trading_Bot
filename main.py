@@ -1,4 +1,8 @@
 import logging
+import random
+import numpy as np
+import torch
+
 from src.config import setup_logging
 from src.data_engine import DataEngine
 from src.model_engine import ModelEngine
@@ -6,11 +10,31 @@ from src.model_engine import ModelEngine
 # Инициализация логгера для main скрипта
 logger = logging.getLogger(__name__)
 
+def set_seed(seed=42):
+    """
+    Фиксирует все источники случайности для обеспечения
+    100% воспроизводимости результатов ML-пайплайна.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # Для мульти-GPU систем
+
+    # Жестко заставляем алгоритмы CUDA быть детерминированными
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    logger.info(f"Глобальный Random Seed зафиксирован на значении: {seed}")
+
 def main():
     # Инициализация глобальной настройки логирования (вывод в консоль)
     setup_logging(level=logging.INFO)
 
     logger.info("=== Трейдинг-платформа Quanti ===")
+
+    # Фиксируем сид ПЕРЕД инициализацией и запуском движков
+    set_seed(42)
 
     # 1. Инициализируем компоненты архитектуры
     data_engine = DataEngine()
