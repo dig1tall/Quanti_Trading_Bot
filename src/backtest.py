@@ -3,6 +3,8 @@ import logging
 import torch
 import numpy as np
 import pandas as pd
+import vectorbt as vbt
+from datetime import datetime
 
 from src.config import MODEL_PARAMS, TRAINING_PARAMS, FEATURES_FILE_PATH, PROJECT_ROOT
 from src.dataset import get_data_loaders
@@ -11,11 +13,11 @@ from src.model import QuantiGRU
 logger = logging.getLogger(__name__)
 
 def run_backtest():
-    logger.info("=== Запуск модуля бэктестинга Quanti ===")
+    logger.info("=== Запуск продвинутого бэктестинга Quanti через VectorBT ===")
 
     device = torch.device(TRAINING_PARAMS['device'] if torch.cuda.is_available() else 'cpu')
 
-    # 1. Загружаем лоадеры (нам нужен только val_loader)
+    # 1. Загружаем лоадеры
     _, val_loader = get_data_loaders(
         file_path=FEATURES_FILE_PATH,
         sequence_length=MODEL_PARAMS['sequence_length'],
@@ -23,7 +25,7 @@ def run_backtest():
         train_split=TRAINING_PARAMS['train_split']
     )
 
-    # Автоматически определяем размер входа
+    # Определяем размер входа
     X_sample, _ = next(iter(val_loader))
     input_size = X_sample.shape[2]
 
@@ -42,12 +44,12 @@ def run_backtest():
 
     model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.eval()
-    logger.info("Веса лучшей модели успешно загружены. Запуск симуляции...")
+    logger.info("Веса лучшей модели успешно загружены.")
 
     all_preds = []
     all_targets = []
 
-    # 3. Собираем прогнозы модели по всей валидационной выборке
+    # 3. Собираем прогнозы модели
     with torch.no_grad():
         for X_batch, y_batch in val_loader:
             X_batch = X_batch.to(device)
@@ -57,33 +59,74 @@ def run_backtest():
             all_targets.extend(y_batch.numpy().flatten())
 
     preds = np.array(all_preds)
-    targets = np.array(all_targets) # Реальные Daily_Return следующих свечей
+    targets = np.array(all_targets)
 
-    # 4. Магия бэктеста: симулируем простейшую торговую стратегию
-    # Если прогноз > 0, мы в позиции (Long = 1), если < 0, мы вне рынка (Cash = 0)
-    signals = np.where(preds > 0, 1, 0)
+    # 4. ПОДГОТОВКА ДАННЫХ ДЛЯ VECTORBT
+    # Нам нужны реальные цены закрытия для валидационного куска. Загружаем сырой файл.
+    df = pd.read_parquet(FEATURES_FILE_PATH)
 
-    # Доходность нашей стратегии: если мы в позиции, получаем реальную доходность дня, если нет — 0.
-    strategy_returns = signals * targets
+    # Вычисляем точную длину валидационной выборки, учитывая сдвиг на sequence_length
+    # get_data_loaders отрезает train_split, остаток идет в validation.
+    total_samples = len(df) - MODEL_PARAMS['sequence_length']
+    val_size = len(targets) # Берем точно по размеру собранных таргетов
 
-    # Считаем кумулятивную (накопленную) доходность через сложные проценты
-    # Формула: Prod(1 + return) - 1
-    cum_strategy = np.prod(1.0 + strategy_returns) - 1.0
-    cum_market = np.prod(1.0 + targets) - 1.0 # Стратегия "Купи и держи"
+    # Вырезаем цены закрытия, которые соответствуют валидационным прогнозам
+    # Они находятся в самом конце датасета
+    val_close = df['Close'].iloc[-val_size:].reset_index(drop=True)
 
-    # Считаем точность знака (угадал ли бот просто направление движения: вверх/вниз)
+    # 5. ГЕНЕРАЦИЯ СИГНАЛОВ (Включая Шорты!)
+    # Векторизованная логика:
+    # Если прогноз > 0 -> 1 (Long)
+    # Если прогноз < 0 -> -1 (Short)
+    signals = np.where(preds > 0, 1, -1)
+
+    # Превращаем в Pandas Series, чтобы VectorBT подтянул правильные индексы
+    signals_series = pd.Series(signals, name='Quanti_Signals')
+
+    # 6. МАГИЯ VECTORBT: ЗАПУСК СИМУЛЯЦИИ ПОРТФЕЛЯ
+    logger.info("Запуск движка симуляции VectorBT Portfolio...")
+
+    entries = signals_series == 1
+    short_entries = signals_series == -1
+
+    # Задаем комиссию биржи (например, 0.06% за сделку — стандарт для Binance Futures Taker)
+    fee_rate = 0.0006
+
+    portfolio = vbt.Portfolio.from_signals(
+        close=val_close,
+        entries=entries,                # Сигналы на открытие LONG
+        exits=short_entries,            # Выход из LONG совпадает со входом в SHORT
+        short_entries=short_entries,    # Сигналы на открытие SHORT
+        short_exits=entries,            # Выход из SHORT совпадает со входом в LONG
+        init_cash=10000.0,              # Стартовый депозит в $
+        fees=fee_rate,                  # Учитываем комиссии
+        freq='1D'                       # Частота данных
+    )
+
+    # 7. РАСЧЕТ И ВЫВОД МЕТРИК
     direction_correct = np.sum(np.sign(preds) == np.sign(targets)) / len(targets)
 
-    logger.info("--- Результаты бэктеста на валидационном периоде ---")
-    logger.info(f"Количество дней для теста: {len(targets)}")
-    logger.info(f"Точность предсказания направления (Accuracy): {direction_correct * 100:.2f}%")
-    logger.info(f"Доходность стратегии 'Купи и держи' (Рынок): {cum_market * 100:.2f}%")
-    logger.info(f"Доходность торгового бота Quanti:          {cum_strategy * 100:.2f}%")
+    logger.info("--- МЕТРИКИ VECTORBT (ВАЛИДАЦИОННЫЙ ПЕРИОД) ---")
+    logger.info(f"Количество свечей в тесте:        {len(targets)}")
+    logger.info(f"Accuracy направления знака:       {direction_correct * 100:.2f}%")
 
-    if cum_strategy > cum_market:
-        logger.info(" Результат: Бот переиграл маркет-тренд!")
-    else:
-        logger.warning(" Результат: Бот уступил пассивному удержанию актива.")
+    # Печатаем весь дашборд VectorBT целиком без риска словить KeyError
+    logger.info(f"\n{portfolio.stats().to_string()}")
+
+    # 8. СОХРАНЕНИЕ ГРАФИКА (Опционально)
+    reports_dir = os.path.join(PROJECT_ROOT, "reports")
+    os.makedirs(reports_dir, exist_ok=True)
+
+    # Формируем имя файла: дата_время (например: 2026-06-17_20-35)
+    current_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    report_filename = f"backtest_{current_time}.html"
+    report_path = os.path.join(reports_dir, report_filename)
+
+    # Генерируем и сохраняем интерактивный Plotly график
+    fig = portfolio.plot()
+    fig.write_html(report_path)
+
+    logger.info(f"Интерактивный график бэктеста успешно сохранен в: reports/{report_filename}")
 
 if __name__ == "__main__":
     from src.config import setup_logging

@@ -1,5 +1,23 @@
+# IDEs and editors
 .idea/
+.vscode/
+*.swp
+
+# Python environment & cache
 .venv/
+env/
+venv/
 __pycache__/
 *.pyc
-data/*.parquet
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Quanti Project Artefacts (Автогенерация и тяжелые файлы)
+data/
+models/
+reports/
+
+# Дополнительный мусор ОС
+.DS_Store
+Thumbs.db
