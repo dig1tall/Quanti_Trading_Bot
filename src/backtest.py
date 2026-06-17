@@ -6,7 +6,7 @@ import pandas as pd
 import vectorbt as vbt
 from datetime import datetime
 
-from src.config import MODEL_PARAMS, TRAINING_PARAMS, FEATURES_FILE_PATH, PROJECT_ROOT
+from src.config import MODEL_PARAMS, TRAINING_PARAMS, FEATURES_FILE_PATH, PROJECT_ROOT, DATA_FILE_PATH
 from src.dataset import get_data_loaders
 from src.model import QuantiGRU
 
@@ -62,23 +62,24 @@ def run_backtest():
     targets = np.array(all_targets)
 
     # 4. ПОДГОТОВКА ДАННЫХ ДЛЯ VECTORBT
-    # Нам нужны реальные цены закрытия для валидационного куска. Загружаем сырой файл.
-    df = pd.read_parquet(FEATURES_FILE_PATH)
+    # Загружаем базовый файл с сырыми, не отскейленными ценами в долларах
+    df_raw = pd.read_parquet(DATA_FILE_PATH)
 
     # Вычисляем точную длину валидационной выборки, учитывая сдвиг на sequence_length
-    # get_data_loaders отрезает train_split, остаток идет в validation.
-    total_samples = len(df) - MODEL_PARAMS['sequence_length']
     val_size = len(targets) # Берем точно по размеру собранных таргетов
 
     # Вырезаем цены закрытия, которые соответствуют валидационным прогнозам
-    # Они находятся в самом конце датасета
-    val_close = df['Close'].iloc[-val_size:].reset_index(drop=True)
+    val_close = df_raw['Close'].iloc[-val_size:].reset_index(drop=True)
 
     # 5. ГЕНЕРАЦИЯ СИГНАЛОВ (Включая Шорты!)
+    # Задаем порог уверенности. Подбирается экспериментально (например, 0.002 = 0.2%)
+    threshold = 0.0015
     # Векторизованная логика:
     # Если прогноз > 0 -> 1 (Long)
     # Если прогноз < 0 -> -1 (Short)
-    signals = np.where(preds > 0, 1, -1)
+    signals = np.zeros_like(preds)
+    signals[preds > threshold] = 1
+    signals[preds < -threshold] = -1
 
     # Превращаем в Pandas Series, чтобы VectorBT подтянул правильные индексы
     signals_series = pd.Series(signals, name='Quanti_Signals')
@@ -86,8 +87,13 @@ def run_backtest():
     # 6. МАГИЯ VECTORBT: ЗАПУСК СИМУЛЯЦИИ ПОРТФЕЛЯ
     logger.info("Запуск движка симуляции VectorBT Portfolio...")
 
+    # Вход в лонг — когда сигнал 1. Выход из лонга — когда сигнал стал 0 или -1.
     entries = signals_series == 1
+    exits = signals_series <= 0
+
+    # Вход в шорт — когда сигнал -1. Выход из шорта — когда сигнал стал 0 или 1.
     short_entries = signals_series == -1
+    short_exits = signals_series >= 0
 
     # Задаем комиссию биржи (например, 0.06% за сделку — стандарт для Binance Futures Taker)
     fee_rate = 0.0006
@@ -95,9 +101,9 @@ def run_backtest():
     portfolio = vbt.Portfolio.from_signals(
         close=val_close,
         entries=entries,                # Сигналы на открытие LONG
-        exits=short_entries,            # Выход из LONG совпадает со входом в SHORT
+        exits=exits,                    # Выход из LONG совпадает со входом в SHORT
         short_entries=short_entries,    # Сигналы на открытие SHORT
-        short_exits=entries,            # Выход из SHORT совпадает со входом в LONG
+        short_exits=short_exits,        # Выход из SHORT совпадает со входом в LONG
         init_cash=10000.0,              # Стартовый депозит в $
         fees=fee_rate,                  # Учитываем комиссии
         freq='1D'                       # Частота данных
