@@ -101,20 +101,19 @@ def run_backtest():
     signals_series = pd.Series(signals, name='Quanti_Signals')
 
     # 6. МАГИЯ VECTORBT: ЗАПУСК СИМУЛЯЦИИ ПОРТФЕЛЯ
-    logger.info("Запуск движка симуляции VectorBT Portfolio...")
+    logger.info("Запуск движка симуляции VectorBT Portfolio со стоп-лоссами...")
 
-    # Вход в LONG, когда модель уверена в росте (1)
     entries = signals_series == 1
     exits = signals_series == -1
-
-    # Вход в SHORT, когда модель уверена в падении (-1)
     short_entries = signals_series == -1
     short_exits = signals_series == 1
 
-    # Вытаскиваем все параметры из BACKTEST_PARAMS
     fee_rate = BACKTEST_PARAMS['fee_rate']
     init_cash = BACKTEST_PARAMS['init_cash']
     freq = BACKTEST_PARAMS['freq']
+
+    sl_val = BACKTEST_PARAMS.get('stop_loss', None)
+    tp_val = BACKTEST_PARAMS.get('take_profit', None)
 
     portfolio = vbt.Portfolio.from_signals(
         close=val_close,
@@ -122,9 +121,11 @@ def run_backtest():
         exits=exits,
         short_entries=short_entries,
         short_exits=short_exits,
-        init_cash=init_cash,            # Теперь берется из конфига
-        fees=fee_rate,                  # Из конфига
-        freq=freq                       # Теперь берется из конфига ('1D')
+        init_cash=init_cash,
+        fees=fee_rate,
+        freq=freq,
+        sl_stop=sl_val,         # Процент стоп-лосса (например, 0.02)
+        tp_stop=tp_val          # Процент тейк-профита (например, 0.04)
     )
 
     # 7. РАСЧЕТ И ВЫВОД МЕТРИК

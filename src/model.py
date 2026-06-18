@@ -43,6 +43,30 @@ class QuantiGRU(nn.Module):
 
         return prediction
 
+import torch
+import torch.nn as nn
+
+class DirectionalMSELoss(nn.Module):
+    """
+    Кастомная функция потерь для трейдинга.
+    Сочетает MSE регрессию со штрафом за неверное направление прогноза.
+    """
+    def __init__(self, direction_alpha=2.5):
+        super().__init__()
+        self.mse = nn.MSELoss()
+        self.direction_alpha = direction_alpha
+
+    def forward(self, pred, target):
+        # Базовая ошибка величины движения
+        base_mse = self.mse(pred, target)
+
+        # Штрафуем, если знаки не совпадают.
+        # Если pred и target имеют разные знаки, их произведение отрицательно.
+        # relu(-pred * target) вернет положительный штраф только при неверном направлении.
+        direction_penalty = torch.mean(torch.relu(-pred * target))
+
+        return base_mse + (self.direction_alpha * direction_penalty)
+
 # Проверяем работу архитектуры через логи
 if __name__ == "__main__":
     # Настраиваем глобальный логер из конфига

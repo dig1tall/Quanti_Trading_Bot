@@ -64,13 +64,11 @@ class DataEngine:
         df_train = df_features.iloc[:split_idx].copy()
         df_val = df_features.iloc[split_idx:].copy()
 
-        columns_to_exclude = ['Daily_Return', 'Date', 'date']
+        columns_to_exclude = ['Date', 'date', 'target_forward'] # Явно добавляем таргет в исключения!
         all_columns = [col for col in df_features.columns if col not in columns_to_exclude]
 
-        # Обучаем скейлер ТОЛЬКО на Train
+        # Обучаем скейлер и трансформируем ТОЛЬКО фичи
         self.scaler.fit(df_train, all_columns)
-
-        # Трансформируем обе выборки независимо на основе параметров Train
         df_train_scaled = self.scaler.transform(df_train)
         df_val_scaled = self.scaler.transform(df_val)
 

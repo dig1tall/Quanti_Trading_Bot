@@ -7,6 +7,7 @@ import torch.optim as optim
 from src.config import MODEL_PARAMS, TRAINING_PARAMS, FEATURES_FILE_PATH, PROJECT_ROOT
 from src.dataset import get_data_loaders
 from src.model import QuantiGRU
+from src.model import DirectionalMSELoss
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def train_model():
     logger.info(f"Архитектура модели инициализирована: {MODEL_PARAMS['architecture']} (Dropout: {MODEL_PARAMS['dropout_rate']})")
 
     # 4. Функция потерь (MSE для регрессии) и Оптимизатор
-    criterion = nn.MSELoss()
+    criterion = DirectionalMSELoss(direction_alpha=3.0)
     optimizer = optim.Adam(model.parameters(), lr=TRAINING_PARAMS['learning_rate'])
 
     # Количество полных циклов (проходов) по датасету
