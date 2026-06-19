@@ -21,58 +21,81 @@ class CryptoDataset(Dataset):
             self.df.set_index('date', inplace=True)
         self.df = self.df.sort_index()
 
-        # Гарантируем, что Daily_Return на месте
         if 'Daily_Return' not in self.df.columns:
             raise KeyError("Критическая ошибка: колонка 'Daily_Return' не найдена в датасете!")
 
-        # 1. Вытаскиваем фичи (чистая история, без заглядывания вперед)
-        # Колонку Daily_Return можно оставить как фичу, она ведь историческая
+        # 1. Вытаскиваем чистые исторические фичи
         self.X = self.df.values.astype(np.float32)
 
-        # 2. Считаем таргет вручную прямо из массива доходностей.
-        # Для индекса i нам нужно среднее доходностей на шагах от (i + 1) до (i + forward_horizon)
+        # 2. Считаем сырые значения будущего изменения цены
         returns = self.df['Daily_Return'].values
-        self.targets = np.zeros_like(returns, dtype=np.float32)
+        raw_targets = np.zeros_like(returns, dtype=np.float32)
 
         for i in range(len(returns) - forward_horizon):
-            # Будущее окно доходностей строго ПОСЛЕ текущего шага i
-            self.targets[i] = np.mean(returns[i + 1 : i + 1 + forward_horizon])
+            raw_targets[i] = np.mean(returns[i + 1 : i + 1 + forward_horizon])
 
+        # Вычисляем квантили на основе всей выборки (отсекаем шум)
+        # 35% самых сильных падений — Шорт, 35% самых сильных ростов — Лонг, остальное — АФК
+        lower_threshold = np.quantile(raw_targets, 0.35)
+        upper_threshold = np.quantile(raw_targets, 0.65)
+
+        # Создаем массив меток классов (по умолчанию 1 — АФК/Боковик)
+        self.targets = np.ones_like(raw_targets, dtype=np.int64)
+
+        self.targets[raw_targets > upper_threshold] = 2  # Класс 2: Лонг
+        self.targets[raw_targets < lower_threshold] = 0  # Класс 0: Шорт
+
+        # Считаем баланс классов для логов
+        unique, counts = np.unique(self.targets[:-forward_horizon], return_counts=True)
+        class_dist = dict(zip(unique, counts))
+        logger.info(f"Распределение классов в датасете: {class_dist}")
         logger.info(f"Датасет успешно инициализирован. Доступно строк: {len(self.df)}")
 
     def __len__(self) -> int:
-        # Урезаем длину, чтобы окно фич + горизонт предсказания не вылетали за массив
         return len(self.df) - self.sequence_length - self.forward_horizon
 
     def __getitem__(self, idx: int):
-        # Окно фич: от idx до idx + sequence_length - 1 (например, 30 свечей)
         X_window = self.X[idx : idx + self.sequence_length]
 
-        # Таргет: привязан строго к ПОСЛЕДНЕЙ свече в этом окне.
-        # Так как в __init__ мы посчитали target[i] как будущее для шага i,
-        # то для последней свечи окна (индекс idx + self.sequence_length - 1)
-        # значение targets[...] будет содержать среднее за СЛЕДУЮЩИЕ forward_horizon шагов.
+        # Берём класс, соответствующий последней свече в окне
         target_idx = idx + self.sequence_length - 1
         target_val = self.targets[target_idx]
 
         X_tensor = torch.tensor(X_window, dtype=torch.float32)
-        y_tensor = torch.tensor([target_val], dtype=torch.float32)
+        # Для CrossEntropy таргет должен быть скаляром типа LongTensor
+        y_tensor = torch.tensor(target_val, dtype=torch.long)
 
         return X_tensor, y_tensor
 
-def get_data_loaders(file_path: str, sequence_length: int, batch_size: int, train_split: float = 0.8):
-    full_dataset = CryptoDataset(file_path, sequence_length)
-    total_samples = len(full_dataset)
+def get_separated_data_loaders(sequence_length: int, batch_size: int):
+    """Используется в train.py для честного раздельного обучения"""
+    import os
+    from src import config
 
-    train_size = int(total_samples * train_split)
-    val_size = total_samples - train_size
+    train_path = os.path.join(config.DATA_DIR, "train_features.parquet")
+    val_path = os.path.join(config.DATA_DIR, "val_features.parquet")
 
-    logger.info(f"Хронологическое разделение: Train = {train_size} окон, Validation = {val_size} окон.")
+    train_dataset = CryptoDataset(train_path, sequence_length)
+    val_dataset = CryptoDataset(val_path, sequence_length)
 
-    train_dataset = torch.utils.data.Subset(full_dataset, range(0, train_size))
-    val_dataset = torch.utils.data.Subset(full_dataset, range(train_size, total_samples))
+    logger.info(f"Изолированные датасеты для обучения: Train = {len(train_dataset)} окон, Validation = {len(val_dataset)} окон.")
 
+    # shuffle=True только для обучения! Валидация идет строго хронологически
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
 
     return train_loader, val_loader
+
+def get_backtest_loader(sequence_length: int, batch_size: int):
+    """Используется в backtest.py для инференса на валидационных данных"""
+    import os
+    from src import config
+
+    val_path = os.path.join(config.DATA_DIR, "val_features.parquet")
+    val_dataset = CryptoDataset(val_path, sequence_length)
+
+    logger.info(f"Загрузка датасета для бэктестинга: {len(val_dataset)} окон.")
+
+    # Для бэктеста shuffle строго False
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
+    return val_loader

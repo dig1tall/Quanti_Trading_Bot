@@ -72,13 +72,14 @@ class DataEngine:
         df_train_scaled = self.scaler.transform(df_train)
         df_val_scaled = self.scaler.transform(df_val)
 
-        # Соединяем обратно в единый датасет для сохранения
-        df_final = pd.concat([df_train_scaled, df_val_scaled], axis=0)
+        train_path = os.path.join(config.DATA_DIR, "train_features.parquet")
+        val_path = os.path.join(config.DATA_DIR, "val_features.parquet")
+
+        df_train_scaled.to_parquet(train_path)
+        df_val_scaled.to_parquet(val_path)
 
         logger.info(f"Масштабирование успешно применено. Train={len(df_train_scaled)} строк, Val={len(df_val_scaled)} строк.")
-        logger.info("Итоговая матрица признаков подготовлена. Превью датасета:\n%s", df_final.tail(3))
-
-        self._save_features(df_final)
+        logger.info(f"Данные сохранены в файлы:\n -> {train_path}\n -> {val_path}")
 
     def _save_features(self, df: pd.DataFrame) -> None:
         """Внутренний метод для сохранения итогового датасета по системному пути."""

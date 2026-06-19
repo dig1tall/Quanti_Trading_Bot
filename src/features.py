@@ -118,8 +118,8 @@ class FeatureExtractor:
             df_features['Trend_Strength'] = self._calculate_adx_from_returns(df_norm, self.adx_per).fillna(0)
 
             # Финальная чистка
-            df_clean = df_features.dropna()
-            df_clean = df_clean.replace([np.inf, -np.inf], 0)
+            df_clean = df_features.replace([np.inf, -np.inf], np.nan)
+            df_clean = df_clean.dropna()
 
             dropped_rows = initial_rows - len(df_clean)
             logger.info(f"Генерация фич завершена. Удалено строк с NaN/Inf: {dropped_rows}. Строк на выходе: {len(df_clean)}")

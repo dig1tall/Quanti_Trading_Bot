@@ -3,9 +3,9 @@ import logging
 
 # --- НАСТРОЙКИ ЗАГРУЗКИ ДАННЫХ ---
 DATA_LOAD_PARAMS = {
-    'ticker': "BTC-USD",  # ticker (Тикер) — это краткое уникальное название актива на бирже.
-    'interval': "1m",     # interval (Таймфрейм) — это размер одной свечи (одной строчки в таблице).
-    'period': "7d"
+    'ticker': "BTC-USDT",  # ticker (Тикер) — это краткое уникальное название актива на бирже.
+    'interval': "5m",     # interval (Таймфрейм) — это размер одной свечи (одной строчки в таблице).
+    'period': "60d"
 }
 
 # --- НАСТРОЙКИ ГЕНЕРАЦИИ ПРИЗНАКОВ 1D (Feature Engineering) ---
@@ -26,16 +26,25 @@ DATA_LOAD_PARAMS = {
 FEATURE_PARAMS = {
     'target_column': 'Close',
     'forward_horizon': 5,
-    'ema_fast_period': 60,       # Fast тренд: 1 час (60 минут)
-    'ema_slow_period': 180,      # Slow тренд: 3 часа (180 минут)
-    'sma_period': 120,           # Базовая скользящая: 2 часа
-    'rsi_period': 30,            # Сглаженный RSI под минуты
-    'macd_signal_period': 45,
-    'bb_period': 120,            # Боллинджер на 2 часа
-    'bb_std_dev': 2,
-    'adx_period': 30,
-    'obv_rolling_window': 30,
-    'chaikin_rolling_window': 60
+
+    # Мульти-горизонты для доходностей (ret_1 - микро-импульс, ret_30 - часовой тренд)
+    'ret_horizons': [1, 3, 5, 15, 30],
+
+    # Окна для волатильности
+    'vol_fast_period': 12,
+    'vol_slow_period': 72,
+
+    # Трендовые индикаторы
+    'ema_fast_period': 9,
+    'ema_slow_period': 36,
+    'sma_period': 24,
+    'rsi_period': 21,
+    'macd_signal_period': 9,
+    'bb_period': 24,
+    'bb_std_dev': 2.2,
+    'adx_period': 20,
+    'obv_rolling_window': 20,
+    'chaikin_rolling_window': 30
 }
 
 # --- НАСТРОЙКИ МАСШТАБИРОВАНИЯ ---
@@ -49,8 +58,8 @@ MODEL_PARAMS = {
     'sequence_length': 45,  # Сколько свечей смотрим назад (память модели)
     'hidden_size': 64,       # Мощность памяти скрытого слоя
     'num_layers': 2,        # Количество слоев GRU
-    'output_size': 1,        # Предсказываем 1 число
-    'dropout_rate': 0.3     # Доля случайно отключаемых нейронов во время тренировки
+    'output_size': 3,        # Предсказываем 1 число
+    'dropout_rate': 0.5     # Доля случайно отключаемых нейронов во время тренировки
 }
 
 # --- НАСТРОЙКИ ОБУЧЕНИЯ ---
@@ -66,7 +75,7 @@ MODEL_PARAMS = {
 TRAINING_PARAMS = {
     'batch_size': 64,
     'epochs': 50,
-    'learning_rate': 0.001,
+    'learning_rate': 0.0003,
     'train_split': 0.7,     # 80% данных на учебу, 20% на валидацию
     'device': 'cuda',        # Режим видеокарты
     'patience': 10           # Ожидание Early Stopping
@@ -84,11 +93,11 @@ TRAINING_PARAMS = {
 # 1m
 BACKTEST_PARAMS = {
     'init_cash': 10000.0,
-    'threshold': 0.0015,       # Снижаем порог уверенности модели для входа (0.1%)
+    'threshold': 0.55,       # Снижаем порог уверенности модели для входа (0.1%)
     'fee_rate': 0.0006,       # 0.06% комиссия (Binance Futures)
-    'stop_loss': 0.005,       # Короткий стоп-лосс: 0.4%
-    'take_profit': 0.015,     # Тейк-профит: 0.8% (соотношение риск/прибыль 1:2)
-    'time_stop': 60,
+    'stop_loss': 0.01,       # Короткий стоп-лосс: 0.4%
+    'take_profit': 0.02,     # Тейк-профит: 0.8% (соотношение риск/прибыль 1:2)
+    'time_stop': 120,
     'freq': '1m',
     'save_plots': False
 }

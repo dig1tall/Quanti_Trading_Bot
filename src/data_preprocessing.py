@@ -38,19 +38,39 @@ class Scaler:
                 continue
 
             if self.method == 'minmax':
+                min_val = float(df[col].min())
+                max_val = float(df[col].max())
+                # ЗАЩИТА: если max == min (константный признак), ставим разницу 1e-8 вместо 0
+                denom = (max_val - min_val) if max_val != min_val else 1e-8
                 self.params[col] = {
-                    'min': float(df[col].min()),
-                    'max': float(df[col].max())
+                    'min': min_val,
+                    'denom': denom
                 }
             elif self.method == 'standard':
+                mean_val = float(df[col].mean())
+                std_val = float(df[col].std())
+                # ЗАЩИТА: если std == 0, ставим 1e-8
+                if std_val == 0 or np.isnan(std_val):
+                    std_val = 1e-8
                 self.params[col] = {
-                    'mean': float(df[col].mean()),
-                    'std': float(df[col].std())
+                    'mean': mean_val,
+                    'std': std_val
                 }
             elif self.method == 'robust':
+                median_val = float(df[col].median())
+                q75 = df[col].quantile(0.75)
+                q25 = df[col].quantile(0.25)
+                iqr_val = float(q75 - q25)
+
+                # === ВОТ ТУТ ПРАВКА И ЗАЩИТА ОТ ДЕЛЕНИЯ НА НОЛЬ ===
+                # Если IQR равен 0 (признак не менялся на 50% минутных свечей),
+                # принудительно выставляем минимальное значение 1e-8, чтобы не было NaN/Inf
+                if iqr_val == 0 or np.isnan(iqr_val):
+                    iqr_val = 1e-8
+
                 self.params[col] = {
-                    'median': float(df[col].median()),
-                    'iqr': float(df[col].quantile(0.75) - df[col].quantile(0.25))
+                    'median': median_val,
+                    'iqr': iqr_val
                 }
 
         logger.info(f"Параметры масштабирования успешно сохранены для {len(self.params)} признаков.")
@@ -67,8 +87,7 @@ class Scaler:
             if col not in df_scaled.columns:
                 continue
 
-            # Явное приведение колонки к float64 перед записью дробей,
-            # чтобы избежать падения Pandas (LossySetitemError / TypeError для int64 колонок вроде Volume)
+            # Явное приведение колонки к float64 перед записью дробей
             df_scaled[col] = df_scaled[col].astype(float)
 
             if self.method == 'standard':
@@ -78,18 +97,23 @@ class Scaler:
 
             elif self.method == 'minmax':
                 min_val = col_params['min']
-                max_val = col_params['max']
-                df_scaled.loc[:, col] = (df_scaled[col].to_numpy() - min_val) / (max_val - min_val)
+                denom = col_params['denom']
+                df_scaled.loc[:, col] = (df_scaled[col].to_numpy() - min_val) / denom
 
             elif self.method == 'robust':
                 median = col_params['median']
                 iqr = col_params['iqr']
+
+                # Дополнительная локальная проверка при трансформации
+                if iqr == 0:
+                    iqr = 1e-8
+
                 df_scaled.loc[:, col] = (df_scaled[col].to_numpy() - median) / iqr
 
         return df_scaled
 
     def fit_transform(self, df: pd.DataFrame, columns: list) -> pd.DataFrame:
-        """Удобный метод-комбайн для одновременного обучения и трансформации."""
+        """Удобный метод-комбайн для одновременного обучения и восстановления."""
         self.fit(df, columns)
         return self.transform(df)
 
@@ -107,15 +131,12 @@ if __name__ == "__main__":
     file_path = config.FEATURES_FILE_PATH
 
     if os.path.exists(file_path):
-        # Чтение датасета
         base_df = pd.read_parquet(file_path)
         logger.info(f"Успешно загружен файл для теста: {file_path} (Размерность: {base_df.shape})")
 
-        # Автоматическая сборка фич для масштабирования (все, кроме базовых колонок OHLCV (для теста))
         base_cols = ["Open", "High", "Low", "Close", "Volume"]
         cols_to_scale = [col for col in base_df.columns if col not in base_cols]
 
-        # Создание экземпляра, метод подтянется сам из SCALING_PARAMS['method']
         scaler = Scaler()
         scaled_df = scaler.fit_transform(base_df, cols_to_scale)
 
@@ -124,4 +145,3 @@ if __name__ == "__main__":
         print(scaled_df[cols_to_scale].tail(3))
     else:
         logger.error(f"Файл с признаками не найден по пути: {file_path}")
-        logger.error("Запусти main.py, чтобы сгенерировать валидный датасет с фичами.")

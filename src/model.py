@@ -22,26 +22,16 @@ class QuantiGRU(nn.Module):
         # Слой регуляризации Dropout для фильтрации шума признаков
         self.dropout = nn.Dropout(dropout_rate)
 
-        # Линейный слой для финального прогноза
-        self.fc = nn.Linear(hidden_size, output_size)
+        # На выходе строго 3 класса!
+        self.fc = nn.Linear(hidden_size, 3)
 
+    # Метод forward остается прежним, так как CrossEntropy в PyTorch принимает сырые логиты
+    # (Softmax внутрь лосса уже встроен, здесь его применять НЕ НАДО):
     def forward(self, x):
-        # Инициализируем начальную память нулями
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-
-        # Прогоняем данные через GRU
         out, _ = self.gru(x, h0)
-
-        # Берем выход только последней свечи из окна (индекс -1)
-        out = out[:, -1, :]
-
-        # Применяем Dropout перед линейным классификатором
-        out = self.dropout(out)
-
-        # Получаем финальный прогноз
-        prediction = self.fc(out)
-
-        return prediction
+        out = self.dropout(out[:, -1, :]) # Берем последний временной шаг
+        return self.fc(out) # Возвращает логиты [-inf, +inf]
 
 import torch
 import torch.nn as nn

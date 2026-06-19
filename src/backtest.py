@@ -6,30 +6,30 @@ import pandas as pd
 import vectorbt as vbt
 from datetime import datetime
 
-from src.config import MODEL_PARAMS, TRAINING_PARAMS, FEATURES_FILE_PATH, PROJECT_ROOT, DATA_FILE_PATH, BACKTEST_PARAMS
-from src.dataset import get_data_loaders
+from src import config
+from src.config import MODEL_PARAMS, TRAINING_PARAMS, PROJECT_ROOT, DATA_FILE_PATH, BACKTEST_PARAMS
+from src.dataset import get_backtest_loader
 from src.model import QuantiGRU
 
 logger = logging.getLogger(__name__)
+
 
 def run_backtest():
     logger.info("=== Запуск продвинутого бэктестинга Quanti через VectorBT ===")
 
     device = torch.device(TRAINING_PARAMS['device'] if torch.cuda.is_available() else 'cpu')
 
-    # 1. Загружаем лоадеры
-    _, val_loader = get_data_loaders(
-        file_path=FEATURES_FILE_PATH,
+    # 1. Загружаем лоадер (только валидационный датасет)
+    val_loader = get_backtest_loader(
         sequence_length=MODEL_PARAMS['sequence_length'],
-        batch_size=TRAINING_PARAMS['batch_size'],
-        train_split=TRAINING_PARAMS['train_split']
+        batch_size=TRAINING_PARAMS['batch_size']
     )
 
-    # Определяем размер входа
+    # Автоматически определяем размер входного вектора фич
     X_sample, _ = next(iter(val_loader))
     input_size = X_sample.shape[2]
 
-    # 2. Инициализируем модель и загружаем сохраненные веса
+    # 2. Инициализируем архитектуру и загружаем сохраненные веса модели
     model = QuantiGRU(
         input_size=input_size,
         hidden_size=MODEL_PARAMS['hidden_size'],
@@ -46,67 +46,68 @@ def run_backtest():
     model.eval()
     logger.info("Веса лучшей модели успешно загружены.")
 
-    all_preds = []
+    all_pred_classes = []
     all_targets = []
 
-    # 3. Собираем прогнозы модели
+    # 3. Инференс модели с применением АФК-фильтра по порогу уверенности
+    logger.info("Запуск инференса модели для генерации сигналов...")
     with torch.no_grad():
         for X_batch, y_batch in val_loader:
             X_batch = X_batch.to(device)
-            predictions = model(X_batch)
+            logits = model(X_batch)  # Сырые логиты [batch_size, 3]
 
-            all_preds.extend(predictions.cpu().numpy().flatten())
+            probs = torch.softmax(logits, dim=1)  # Считаем вероятности [batch_size, 3]
+            max_probs, preds_classes = torch.max(probs, dim=1)
+
+            preds_classes = preds_classes.cpu().numpy()
+            max_probs = max_probs.cpu().numpy()
+
+            # Если уверенность в предсказании Long/Short ниже порога — принудительно переводим в класс 1 (АФК)
+            confidence_threshold = BACKTEST_PARAMS.get('threshold', 0.40)
+            for i in range(len(preds_classes)):
+                if max_probs[i] < confidence_threshold:
+                    preds_classes[i] = 1
+
+            all_pred_classes.extend(preds_classes)
             all_targets.extend(y_batch.numpy().flatten())
 
-    preds = np.array(all_preds)
+    final_classes = np.array(all_pred_classes)
     targets = np.array(all_targets)
 
-    # 4. ПОДГОТОВКА ДАННЫХ ДЛЯ VECTORBT (Синхронизация по датам)
-    # Загружаем базовый файл с сырыми ценами и обязательно ставим дату в индекс, как в датасете
+    # 4. СИНХРОНИЗАЦИЯ ЦЕН ПО ИНДЕКСАМ ВАЛИДАЦИИ
     df_raw = pd.read_parquet(DATA_FILE_PATH)
     for date_col in ['Date', 'date']:
         if date_col in df_raw.columns:
             df_raw.set_index(date_col, inplace=True)
     df_raw = df_raw.sort_index()
 
-    # Загружаем итоговый файл фич, чтобы узнать точные даты валидационного окна
-    df_features_file = pd.read_parquet(FEATURES_FILE_PATH)
+    val_path = os.path.join(config.DATA_DIR, "val_features.parquet")
+    df_features_file = pd.read_parquet(val_path)
     for date_col in ['Date', 'date']:
         if date_col in df_features_file.columns:
             df_features_file.set_index(date_col, inplace=True)
     df_features_file = df_features_file.sort_index()
 
-    # Вычисляем точный срез индексов дат, которые попали в валидацию
-    # CryptoDataset отрезает sequence_length окон с начала выборки
-    total_samples = len(df_features_file) - MODEL_PARAMS['sequence_length']
-    train_size = int(total_samples * TRAINING_PARAMS['train_split'])
+    # Срез строго по количеству предсказаний с конца датасета
+    val_dates = df_features_file.index[-len(targets):]
+    val_close = df_raw.loc[val_dates, 'Close']
+    logger.info(f"Цены для VectorBT успешно синхронизированы. Период: с {val_dates[0]} по {val_dates[-1]}")
 
-    # Индексы валидации начинаются после train_size + sequence_length
-    val_start_idx = train_size + MODEL_PARAMS['sequence_length']
-    val_dates = df_features_file.index[val_start_idx : val_start_idx + len(targets)]
+    # 5. КОНВЕРТАЦИЯ КЛАССОВ В СИГНАЛЫ (2 -> Long, 0 -> Short)
+    signals = np.zeros_like(final_classes, dtype=np.float32)
+    signals[final_classes == 2] = 1.0
+    signals[final_classes == 0] = -1.0
 
-    # Вытаскиваем цены закрытия строго по этим датам
-    val_close = df_raw.loc[val_dates, 'Close'].reset_index(drop=True)
-    logger.info(f"Цены для VectorBT успешно синхронизированы по датам. Период: с {val_dates[0]} по {val_dates[-1]}")
+    signals_series = pd.Series(signals, name='Quanti_Signals', index=val_close.index)
+    logger.info(f"Форма массива сигналов для VectorBT: {signals_series.shape}")
+    logger.info(f"Проверка размерностей: Цены {val_close.shape} | Прогнозы {signals.shape}")
 
-    # 5. ГЕНЕРАЦИЯ СИГНАЛОВ (Включая Шорты!)
-    # Задаем порог уверенности. Подбирается экспериментально (например, 0.002 = 0.2%)
-    threshold = BACKTEST_PARAMS['threshold']
-
-    signals = np.zeros_like(preds)
-    signals[preds > threshold] = 1
-    signals[preds < -threshold] = -1
-
-    # Превращаем в Pandas Series
-    signals_series = pd.Series(signals, name='Quanti_Signals')
-
-    # 6. МАГИЯ VECTORBT: ЗАПУСК СИМУЛЯЦИИ ПОРТФЕЛЯ
+    # 6. СИМУЛЯЦИЯ ПОРТФЕЛЯ (Логика удержания позиций, Time-Stop)
     logger.info("Запуск движка симуляции VectorBT Portfolio со стоп-лоссами и Time-Stop...")
 
     raw_entries = (signals_series == 1).to_numpy()
     raw_exits = (signals_series == -1).to_numpy()
 
-    # Вручную применяем Time-Stop на массивы сигналов
     time_stop_val = BACKTEST_PARAMS.get('time_stop', 60)
 
     entries = np.zeros_like(raw_entries, dtype=bool)
@@ -118,9 +119,8 @@ def run_backtest():
     in_short = False
     bars_since_entry = 0
 
-    # Пробегаемся по сигналам и обрубаем их по таймеру
     for i in range(len(signals_series)):
-        # Логика для Лонгов
+        # Лонг-позиции
         if in_long:
             bars_since_entry += 1
             if bars_since_entry >= time_stop_val or raw_exits[i]:
@@ -132,7 +132,7 @@ def run_backtest():
             in_long = True
             bars_since_entry = 0
 
-        # Логика для Шортов
+        # Шорт-позиции
         if in_short:
             bars_since_entry += 1
             if bars_since_entry >= time_stop_val or raw_entries[i]:
@@ -151,47 +151,45 @@ def run_backtest():
     sl_val = BACKTEST_PARAMS.get('stop_loss', None)
     tp_val = BACKTEST_PARAMS.get('take_profit', None)
 
-    # Теперь вызываем чистый from_signals, где все лимиты времени уже внутри массивов
+    # Все булевы маски строго оборачиваются в Series с DatetimeIndex
     portfolio = vbt.Portfolio.from_signals(
         close=val_close,
-        entries=pd.Series(entries),
-        exits=pd.Series(exits),
-        short_entries=pd.Series(short_entries),
-        short_exits=pd.Series(short_exits),
+        entries=pd.Series(entries, index=val_close.index),
+        exits=pd.Series(exits, index=val_close.index),
+        short_entries=pd.Series(short_entries, index=val_close.index),
+        short_exits=pd.Series(short_exits, index=val_close.index),
         init_cash=init_cash,
         fees=fee_rate,
         freq=freq,
-        sl_stop=sl_val,         # Цена всё ещё контролируется встроенными стопами
+        sl_stop=sl_val,
         tp_stop=tp_val
     )
 
-    # 7. РАСЧЕТ И ВЫВОД МЕТРИК
-    direction_correct = np.sum(np.sign(preds) == np.sign(targets)) / len(targets)
+    # 7. РАСЧЕТ И ВЫВОД МЕТРИК КЛАССИФИКАЦИИ И ТОРГОВЛИ
+    accuracy = np.sum(final_classes == targets) / len(targets)
 
     logger.info("--- МЕТРИКИ VECTORBT (ВАЛИДАЦИОННЫЙ ПЕРИОД) ---")
     logger.info(f"Количество свечей в тесте:        {len(targets)}")
-    logger.info(f"Accuracy направления знака:       {direction_correct * 100:.2f}%")
+    logger.info(f"Итоговый Accuracy моделей на тесте: {accuracy * 100:.2f}%")
 
-    # Печатаем весь дашборд VectorBT целиком без риска словить KeyError
     logger.info(f"\n{portfolio.stats().to_string()}")
 
-    # 8. СОХРАНЕНИЕ ГРАФИКА
+    # 8. СОХРАНЕНИЕ ГРАФИКА РЕЗУЛЬТАТОВ
     if BACKTEST_PARAMS.get('save_plots', False):
         reports_dir = os.path.join(PROJECT_ROOT, "reports")
         os.makedirs(reports_dir, exist_ok=True)
 
-        # Формируем имя файла: дата_время (например: 2026-06-18_01-47)
         current_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
         report_filename = f"backtest_{current_time}.html"
         report_path = os.path.join(reports_dir, report_filename)
 
-        # Генерируем и сохраняем интерактивный Plotly график
         fig = portfolio.plot()
         fig.write_html(report_path)
 
         logger.info(f"Интерактивный график бэктеста успешно сохранен в: reports/{report_filename}")
     else:
         logger.info("Сохранение графиков отключено в конфиге (save_plots=False).")
+
 
 if __name__ == "__main__":
     from src.config import setup_logging
