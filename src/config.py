@@ -3,7 +3,7 @@ import logging
 
 # --- НАСТРОЙКИ ЗАГРУЗКИ ДАННЫХ ---
 DATA_LOAD_PARAMS = {
-    'ticker': "ETH-USD",  # ticker (Тикер) — это краткое уникальное название актива на бирже.
+    'ticker': "BTC-USD",  # ticker (Тикер) — это краткое уникальное название актива на бирже.
     'interval': "1m",     # interval (Таймфрейм) — это размер одной свечи (одной строчки в таблице).
     'period': "7d"
 }
@@ -88,6 +88,7 @@ BACKTEST_PARAMS = {
     'fee_rate': 0.0006,       # 0.06% комиссия (Binance Futures)
     'stop_loss': 0.005,       # Короткий стоп-лосс: 0.4%
     'take_profit': 0.015,     # Тейк-профит: 0.8% (соотношение риск/прибыль 1:2)
+    'time_stop': 60,
     'freq': '1m',
     'save_plots': False
 }

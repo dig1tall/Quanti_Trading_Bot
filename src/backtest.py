@@ -101,31 +101,68 @@ def run_backtest():
     signals_series = pd.Series(signals, name='Quanti_Signals')
 
     # 6. МАГИЯ VECTORBT: ЗАПУСК СИМУЛЯЦИИ ПОРТФЕЛЯ
-    logger.info("Запуск движка симуляции VectorBT Portfolio со стоп-лоссами...")
+    logger.info("Запуск движка симуляции VectorBT Portfolio со стоп-лоссами и Time-Stop...")
 
-    entries = signals_series == 1
-    exits = signals_series == -1
-    short_entries = signals_series == -1
-    short_exits = signals_series == 1
+    raw_entries = (signals_series == 1).to_numpy()
+    raw_exits = (signals_series == -1).to_numpy()
 
-    fee_rate = BACKTEST_PARAMS['fee_rate']
-    init_cash = BACKTEST_PARAMS['init_cash']
-    freq = BACKTEST_PARAMS['freq']
+    # Вручную применяем Time-Stop на массивы сигналов
+    time_stop_val = BACKTEST_PARAMS.get('time_stop', 60)
+
+    entries = np.zeros_like(raw_entries, dtype=bool)
+    exits = np.zeros_like(raw_exits, dtype=bool)
+    short_entries = np.zeros_like(raw_entries, dtype=bool)
+    short_exits = np.zeros_like(raw_exits, dtype=bool)
+
+    in_long = False
+    in_short = False
+    bars_since_entry = 0
+
+    # Пробегаемся по сигналам и обрубаем их по таймеру
+    for i in range(len(signals_series)):
+        # Логика для Лонгов
+        if in_long:
+            bars_since_entry += 1
+            if bars_since_entry >= time_stop_val or raw_exits[i]:
+                exits[i] = True
+                in_long = False
+                bars_since_entry = 0
+        elif raw_entries[i] and not in_short:
+            entries[i] = True
+            in_long = True
+            bars_since_entry = 0
+
+        # Логика для Шортов
+        if in_short:
+            bars_since_entry += 1
+            if bars_since_entry >= time_stop_val or raw_entries[i]:
+                short_exits[i] = True
+                in_short = False
+                bars_since_entry = 0
+        elif raw_exits[i] and not in_long:
+            short_entries[i] = True
+            in_short = True
+            bars_since_entry = 0
+
+    fee_rate = BACKTEST_PARAMS.get('fee_rate', 0.0006)
+    init_cash = BACKTEST_PARAMS.get('init_cash', 10000.0)
+    freq = BACKTEST_PARAMS.get('freq', '1m')
 
     sl_val = BACKTEST_PARAMS.get('stop_loss', None)
     tp_val = BACKTEST_PARAMS.get('take_profit', None)
 
+    # Теперь вызываем чистый from_signals, где все лимиты времени уже внутри массивов
     portfolio = vbt.Portfolio.from_signals(
         close=val_close,
-        entries=entries,
-        exits=exits,
-        short_entries=short_entries,
-        short_exits=short_exits,
+        entries=pd.Series(entries),
+        exits=pd.Series(exits),
+        short_entries=pd.Series(short_entries),
+        short_exits=pd.Series(short_exits),
         init_cash=init_cash,
         fees=fee_rate,
         freq=freq,
-        sl_stop=sl_val,         # Процент стоп-лосса (например, 0.02)
-        tp_stop=tp_val          # Процент тейк-профита (например, 0.04)
+        sl_stop=sl_val,         # Цена всё ещё контролируется встроенными стопами
+        tp_stop=tp_val
     )
 
     # 7. РАСЧЕТ И ВЫВОД МЕТРИК

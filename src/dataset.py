@@ -8,12 +8,9 @@ from src.config import MODEL_PARAMS, TRAINING_PARAMS, FEATURES_FILE_PATH
 logger = logging.getLogger(__name__)
 
 class CryptoDataset(Dataset):
-    """
-    Кастомный датасет PyTorch для работы со скользящими окнами временных рядов.
-    Нарезает плоскую таблицу на трехмерные тензоры X и вектор ответов y.
-    """
-    def __init__(self, file_path: str, sequence_length: int = 30):
+    def __init__(self, file_path: str, sequence_length: int = 30, forward_horizon: int = 5):
         self.sequence_length = sequence_length
+        self.forward_horizon = forward_horizon
 
         logger.info(f"Загрузка данных для PyTorch Датасета из: {file_path}")
         self.df = pd.read_parquet(file_path)
@@ -22,37 +19,44 @@ class CryptoDataset(Dataset):
             self.df.set_index('Date', inplace=True)
         elif 'date' in self.df.columns:
             self.df.set_index('date', inplace=True)
-
         self.df = self.df.sort_index()
-        if 'target_forward' not in self.df.columns:
-            raise KeyError("Критическая ошибка: колонка 'target_forward' не найдена в датасете!")
 
-        self.targets = self.df['target_forward'].values.astype(np.float32)
-
-        # Исключаем лишнее, оставляем только чистые X фичи
-        drop_cols = ['target_forward', 'Daily_Return', 'Date', 'date', 'Datetime']
-        feature_cols = [col for col in self.df.columns if col not in drop_cols]
-
-        self.X = self.df[feature_cols].to_numpy().astype(np.float32)
-        self.y = self.df['target_forward'].to_numpy().astype(np.float32)
-
-        if 'Daily_Return' in self.df.columns:
-            self.returns = self.df['Daily_Return'].values.astype(np.float32)
-        else:
+        # Гарантируем, что Daily_Return на месте
+        if 'Daily_Return' not in self.df.columns:
             raise KeyError("Критическая ошибка: колонка 'Daily_Return' не найдена в датасете!")
+
+        # 1. Вытаскиваем фичи (чистая история, без заглядывания вперед)
+        # Колонку Daily_Return можно оставить как фичу, она ведь историческая
+        self.X = self.df.values.astype(np.float32)
+
+        # 2. Считаем таргет вручную прямо из массива доходностей.
+        # Для индекса i нам нужно среднее доходностей на шагах от (i + 1) до (i + forward_horizon)
+        returns = self.df['Daily_Return'].values
+        self.targets = np.zeros_like(returns, dtype=np.float32)
+
+        for i in range(len(returns) - forward_horizon):
+            # Будущее окно доходностей строго ПОСЛЕ текущего шага i
+            self.targets[i] = np.mean(returns[i + 1 : i + 1 + forward_horizon])
 
         logger.info(f"Датасет успешно инициализирован. Доступно строк: {len(self.df)}")
 
     def __len__(self) -> int:
-        return len(self.df) - self.sequence_length
+        # Урезаем длину, чтобы окно фич + горизонт предсказания не вылетали за массив
+        return len(self.df) - self.sequence_length - self.forward_horizon
 
     def __getitem__(self, idx: int):
-        # ФИКС: Берем self.X вместо несуществующего self.features
-        X = self.X[idx : idx + self.sequence_length]
-        target = self.targets[idx + self.sequence_length - 1]
+        # Окно фич: от idx до idx + sequence_length - 1 (например, 30 свечей)
+        X_window = self.X[idx : idx + self.sequence_length]
 
-        X_tensor = torch.tensor(X, dtype=torch.float32)
-        y_tensor = torch.tensor([target], dtype=torch.float32)
+        # Таргет: привязан строго к ПОСЛЕДНЕЙ свече в этом окне.
+        # Так как в __init__ мы посчитали target[i] как будущее для шага i,
+        # то для последней свечи окна (индекс idx + self.sequence_length - 1)
+        # значение targets[...] будет содержать среднее за СЛЕДУЮЩИЕ forward_horizon шагов.
+        target_idx = idx + self.sequence_length - 1
+        target_val = self.targets[target_idx]
+
+        X_tensor = torch.tensor(X_window, dtype=torch.float32)
+        y_tensor = torch.tensor([target_val], dtype=torch.float32)
 
         return X_tensor, y_tensor
 

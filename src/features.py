@@ -87,8 +87,7 @@ class FeatureExtractor:
             df_features['Volatility_Slow'] = ret.rolling(window=60).std().fillna(0)
 
             # 2. РАСЧЕТ ФОРВАРДНОГО ТАРГЕТА
-            horizon = FEATURE_PARAMS.get('forward_horizon', 5)
-            df_features['target_forward'] = ret.rolling(window=horizon).mean().shift(-horizon)
+
 
             # 3. ТРЕНДЫ И ИМПУЛЬС НА БАЗЕ ДОХОДНОСТЕЙ
             df_features[f'EMA_{self.ema_fast}'] = self._calculate_ema(ret, self.ema_fast)
