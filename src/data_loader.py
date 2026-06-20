@@ -3,7 +3,7 @@ import time
 import logging
 import pandas as pd
 import ccxt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from src import config
 from src.config import DATA_LOAD_PARAMS
@@ -53,7 +53,7 @@ class DataLoader:
 
             # Вычисляем глубину истории
             days_to_download = self._convert_period_to_days(self.period)
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             start_date = now - timedelta(days=days_to_download)
 
             # Переводим в таймстампы в миллисекундах для биржи
@@ -84,7 +84,7 @@ class DataLoader:
 
                 # Логируем прогресс раз в несколько итераций, чтобы не спамить
                 if len(all_candles) % 5000 == 0 or len(candles) < 1000:
-                    current_pipeline_date = datetime.utcfromtimestamp(last_candle_time / 1000)
+                    current_pipeline_date = datetime.fromtimestamp(last_candle_time / 1000, tz=timezone.utc)
                     logger.info(f"Загружено свечей: {len(all_candles)} | Текущая точка истории: {current_pipeline_date}")
 
                 # Пауза между запросами (Защита от Rate Limit)

@@ -1,160 +1,223 @@
 import os
 import logging
+import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from sklearn.metrics import f1_score, confusion_matrix
+import numpy as np
 
-from src.config import MODEL_PARAMS, TRAINING_PARAMS, FEATURES_FILE_PATH, PROJECT_ROOT
+from src import config
+from src.config import MODEL_PARAMS, TRAINING_PARAMS, PROJECT_ROOT
 from src.dataset import get_separated_data_loaders
 from src.model import QuantiGRU
 
 logger = logging.getLogger(__name__)
 
 def train_model():
-    logger.info("=== Инициализация процесса обучения QuantiGRU (Классификация) ===")
+    logger.info("=== Запуск промышленного процесса обучения QuantiGRU Ver 1.1.0 ===")
 
-    # 1. Определяем устройство (CUDA видеокарта или CPU)
+    # 1. ПОЛНАЯ ФИКСАЦИЯ СТЕКА (Режим 100% воспроизводимости)
+    seed = 42
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    logger.info(f"Стек детерминирован. Seed зафиксирован на отметке: {seed}")
+
+    # 2. Определение устройства вычислений
     device = torch.device(TRAINING_PARAMS['device'] if torch.cuda.is_available() else 'cpu')
-    logger.info(f"Используемое устройство для вычислений: {device}")
+    logger.info(f"Используемое устройство: {device}")
 
-    # 2. Загружаем потоки данных (DataLoaders)
+    # 3. Загрузка потоков данных
     train_loader, val_loader = get_separated_data_loaders(
         sequence_length=MODEL_PARAMS['sequence_length'],
         batch_size=TRAINING_PARAMS['batch_size']
     )
 
-    # Автоматически определяем количество фич по первому батчу
-    X_sample, _ = next(iter(train_loader))
-    input_size = X_sample.shape[2]
+    # Выводим распределение классов
+    logger.info("--- Баланс классов в сырых датасетах ---")
+    for name, loader in [("Train", train_loader), ("Validation", val_loader)]:
+        targets = loader.dataset.targets[MODEL_PARAMS['sequence_length']:]
+        unique, counts = np.unique(targets, return_counts=True)
+        total = len(targets)
+        dist_str = ", ".join([f"Класс {k}: {v/total*100:.1f}%" for k, v in zip(unique, counts)])
+        logger.info(f" -> {name}: {dist_str}")
 
-    # 3. Инициализируем модель с поддержкой Dropout из конфига
+    # Извлекаем имена фич и их количество
+    feature_names = train_loader.dataset.feature_names
+    input_size = len(feature_names)
+
+    # 4. Инициализация модели
     model = QuantiGRU(
         input_size=input_size,
         hidden_size=MODEL_PARAMS['hidden_size'],
         num_layers=MODEL_PARAMS['num_layers'],
-        output_size=MODEL_PARAMS['output_size'],  # В конфиге должно быть 3!
+        output_size=MODEL_PARAMS['output_size'],
         dropout_rate=MODEL_PARAMS['dropout_rate']
     ).to(device)
 
-    logger.info(f"Архитектура модели инициализирована: {MODEL_PARAMS['architecture']} (Dropout: {MODEL_PARAMS['dropout_rate']})")
+    # 5. Оптимизаторы и Лосс (LR скорректирован на 3e-4 по рекомендации)
+    smoothing = MODEL_PARAMS.get('label_smoothing', 0.0)
+    criterion = nn.CrossEntropyLoss(label_smoothing=smoothing)
 
-    # 4. Функция потерь (CrossEntropy для классификации) и Оптимизатор
-    # Рассчитываем веса обратно пропорционально частоте классов
-    # Классы: [Short, Hold, Long] -> штрафуем за ошибку в Short/Long в 11 раз сильнее
-    class_weights = torch.tensor([11.0, 1.0, 11.0], device=device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = optim.Adam(
+    optimizer = optim.AdamW(
         model.parameters(),
-        lr=TRAINING_PARAMS['learning_rate'],
-        weight_decay=1e-3  # Штраф за слишком большие веса (L2-регуляризация)
+        lr=3e-4,  # Мягкий и стабильный шаг для финансовых рядов
+        weight_decay=1e-4
     )
 
-    # Количество полных циклов (проходов) по датасету
+    # Следим за максимизацией метрики, поэтому mode='max' для планировщика по F1
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=3
+    )
+
+    use_amp = device.type == 'cuda'
+    amp_scaler = torch.amp.GradScaler('cuda') if use_amp else None
+
     epochs = TRAINING_PARAMS['epochs']
 
-    # Настройки Early Stopping
-    best_val_accuracy = float("-inf")
-    best_val_loss = float('inf')
-    patience = TRAINING_PARAMS['patience']  # Сколько эпох ждем улучшения Val Loss перед остановкой
+    # КРИТЕРИЙ УСПЕХА: Теперь ищем максимум по Macro F1
+    best_val_macro_f1 = float('-inf')
+    patience = TRAINING_PARAMS['patience']
     patience_counter = 0
     best_epoch = 0
 
-    logger.info(f"Старт обучения. Максимум эпох: {epochs} | Patience (Early Stopping): {patience}")
+    logger.info(f"Параметры: Эпох={epochs} | Оптимизатор=AdamW (LR=3e-4) | Критерий Early Stopping = Val Macro F1")
 
-    # 5. Главный цикл обучения
+    # 6. Главный цикл обучения
     for epoch in range(1, epochs + 1):
         # --- ФАЗА ТРЕНИРОВКИ ---
-        model.train()   # Режим обучения (Дропаут активно режет связи)
+        model.train()
         train_loss = 0.0
 
         for X_batch, y_batch in train_loader:
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-
-            # CrossEntropyLoss ожидает одномерный вектор тензоров типа Long: [batch_size]
             y_batch = y_batch.squeeze().long()
+            optimizer.zero_grad()
 
-            optimizer.zero_grad()                       # Обнуление прошлых градиентов
-            predictions = model(X_batch)                # Получение сырых логитов [batch_size, 3]
-            loss = criterion(predictions, y_batch)      # Подсчет CrossEntropy
-            loss.backward()                             # Расчет градиентов
-            optimizer.step()                            # Корректировка весов
+            if use_amp:
+                with torch.amp.autocast('cuda'):
+                    predictions = model(X_batch)
+                    loss = criterion(predictions, y_batch)
+                amp_scaler.scale(loss).backward()
+
+                amp_scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+                amp_scaler.step(optimizer)
+                amp_scaler.update()
+            else:
+                predictions = model(X_batch)
+                loss = criterion(predictions, y_batch)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
 
             train_loss += loss.item() * X_batch.size(0)
 
         train_loss /= len(train_loader.dataset)
 
         # --- ФАЗА ВАЛИДАЦИИ ---
-        model.eval()    # Режим валидации (Дропаут заморожен)
+        model.eval()
         val_loss = 0.0
-        correct_preds = 0
-        total_samples = 0
+        all_preds = []
+        all_targets = []
+        all_confidences = []
 
         with torch.no_grad():
             for X_batch, y_batch in val_loader:
                 X_batch, y_batch = X_batch.to(device), y_batch.to(device)
                 y_batch = y_batch.squeeze().long()
 
-                predictions = model(X_batch)
-                loss = criterion(predictions, y_batch)
+                if use_amp:
+                    with torch.amp.autocast('cuda'):
+                        predictions = model(X_batch)
+                        loss = criterion(predictions, y_batch)
+                else:
+                    predictions = model(X_batch)
+                    loss = criterion(predictions, y_batch)
+
                 val_loss += loss.item() * X_batch.size(0)
 
-                # Считаем Accuracy на валидации для контроля качества обучения
-                _, preds_classes = torch.max(predictions, dim=1)
-                correct_preds += (preds_classes == y_batch).sum().item()
-                total_samples += y_batch.size(0)
+                probs = torch.softmax(predictions, dim=1)
+                batch_confidences, preds_classes = torch.max(probs, dim=1)
+
+                all_preds.extend(preds_classes.cpu().numpy())
+                all_targets.extend(y_batch.cpu().numpy())
+                all_confidences.extend(batch_confidences.cpu().numpy())
 
         val_loss /= len(val_loader.dataset)
-        val_accuracy = (correct_preds / total_samples) * 100
 
-        # Выводим логи каждую эпоху с лоссом и точностью
+        # Считаем метрики качества сигналов
+        val_accuracy = (np.array(all_preds) == np.array(all_targets)).mean() * 100
+        val_macro_f1 = f1_score(all_targets, all_preds, average='macro')
+
+        # Считаем Trading F1 строго по классам 0 (Short) и 2 (Long), игнорируя боковик
+        val_trading_f1 = f1_score(all_targets, all_preds, labels=[0, 2], average='macro')
+        mean_confidence = np.mean(all_confidences)
+
+        current_lr = optimizer.param_groups[0]['lr']
+
+        # Шаг планировщика теперь завязан на максимизацию Macro F1
+        scheduler.step(val_macro_f1)
+
         logger.info(
-            f"Эпоха [{epoch}/{epochs}] | "
-            f"Train Loss: {train_loss:.6f} | "
-            f"Val Loss: {val_loss:.6f} | "
-            f"Val Accuracy: {val_accuracy:.2f}%"
+            f"Эпоха [{epoch:02d}/{epochs:02d}] | LR: {current_lr:.6f} | "
+            f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
+            f"Val Acc: {val_accuracy:.2f}% | **Val Macro F1: {val_macro_f1:.4f}** | "
+            f"Trading F1: {val_trading_f1:.4f} | Conf: {mean_confidence:.3f}"
         )
 
-        # Проверка улучшения Val Loss
-        """
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        # Контроль Early Stopping строго по максимуму VAL MACRO F1
+        if val_macro_f1 > best_val_macro_f1:
+            best_val_macro_f1 = val_macro_f1
             best_epoch = epoch
-            patience_counter = 0 # Сбрасываем счетчик
+            patience_counter = 0
 
-            # Сохраняем веса лучшей модели
+            # Генерируем Confusion Matrix для полной диагностики деградации классов
+            cm = confusion_matrix(all_targets, all_preds)
+            cm_text = (
+                f"\n--- Матрица ошибок (Confusion Matrix) для Лучшей Эпохи {epoch} ---\n"
+                f"            Предсказано\n"
+                f"            Short  Flat   Long\n"
+                f"Факт Short:  {cm[0][0]:<5}  {cm[0][1]:<5}  {cm[0][2]:<5}\n"
+                f"Факт Flat :  {cm[1][0]:<5}  {cm[1][1]:<5}  {cm[1][2]:<5}\n"
+                f"Факт Long :  {cm[2][0]:<5}  {cm[2][1]:<5}  {cm[2][2]:<5}\n"
+                f"-------------------------------------------------------"
+            )
+            logger.info(cm_text)
+
+            # Сохраняем расширенный чекпоинт, включая список фич
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': val_loss,
+                'val_macro_f1': val_macro_f1,
+                'val_trading_f1': val_trading_f1,
+                'feature_names': feature_names,  # Защита от склероза через месяц!
+                'lr': current_lr
+            }
+
             models_dir = os.path.join(PROJECT_ROOT, "models")
             os.makedirs(models_dir, exist_ok=True)
             model_path = os.path.join(models_dir, "best_quanti_model.pth")
-            torch.save(model.state_dict(), model_path)
+            torch.save(checkpoint, model_path)
+            logger.info(f" -> [Запись Чекпоинта] Обновлен максимум Macro F1: {val_macro_f1:.4f}")
         else:
             patience_counter += 1
-        """
-        # --- ФАЗА ВЫБОРА ЛУЧШЕЙ МОДЕЛИ И EARLY STOPPING ---
-        if val_accuracy > best_val_accuracy:
-            best_val_accuracy = val_accuracy
-            best_epoch = epoch
-            patience_counter = 0  # Сбрасываем счетчик, так как есть прогресс по Accuracy!
 
-            # Сохраняем веса лучшей модели
-            models_dir = os.path.join(PROJECT_ROOT, "models")
-            os.makedirs(models_dir, exist_ok=True)
-            model_path = os.path.join(models_dir, "best_quanti_model.pth")
-            torch.save(model.state_dict(), model_path)
-            logger.info(f" -> Сформирован новый максимум Accuracy: {val_accuracy:.2f}%. Веса обновлены.")
-        else:
-            patience_counter += 1  # Точность не выросла — увеличиваем счетчик «терпения»
-
-        # Условие ранней остановки (теперь следит за стагнацией Accuracy)
         if patience_counter >= patience:
-            logger.warning(
-                f" Early Stopping сработал на epoch {epoch}! "
-                f"Точность на валидации не росла {patience} эпох подряд."
-            )
+            logger.warning(f" [Early Stopping] Метрика Macro F1 застряла и не росла {patience} эпох. Стоп.")
             break
 
-    logger.info(f"=== Обучение завершено! ===")
-    logger.info(f"Лучшая эпоха: {best_epoch} | Лучший Val Loss: {best_val_loss:.6f}")
-    logger.info(f"Веса сохранены в: models/best_quanti_model.pth")
+    logger.info(f"=== Процесс обучения успешно завершен! ===")
+    logger.info(f"Лучший результат на эпохе {best_epoch}: Macro F1 = {best_val_macro_f1:.4f}")
 
 
 if __name__ == "__main__":
