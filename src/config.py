@@ -3,38 +3,42 @@ import logging
 
 # --- НАСТРОЙКИ ЗАГРУЗКИ ДАННЫХ ---
 DATA_LOAD_PARAMS = {
-    'ticker': "ETH-USDT",  # ticker (Тикер) — это краткое уникальное название актива на бирже.
+    'ticker': "BTC-USDT",  # ticker (Тикер) — это краткое уникальное название актива на бирже.
     'interval': "1m",     # interval (Таймфрейм) — это размер одной свечи (одной строчки в таблице).
     'period': "60d"
 }
 
-# --- НАСТРОЙКИ ГЕНЕРАЦИИ ПРИЗНАКОВ ДЛЯ 1m таймфрейма ---
+# --- НАСТРОЙКИ ГЕНЕРАЦИИ ПРИЗНАКОВ ДЛЯ 1m ТАЙМФРЕЙМА ---
 FEATURE_PARAMS = {
     'target_column': 'Close',
 
-    'forward_horizon': 5,      # прогноз на 5 минут
+    # Горизонт таргета (в минутах)
+    'forward_horizon': 5,
 
-    'ret_horizons': [1, 5, 15, 30, 60],
+    # Логарифмические доходности (мульти-горизонты лагов)
+    'ret_horizons': [1, 3, 5, 15, 30],
 
-    'vol_fast_period': 30,     # 30 минут
-    'vol_slow_period': 240,    # 4 часа
+    # Окна волатильности (быстрая / медленная)
+    'vol_fast_period': 20,
+    'vol_slow_period': 120,
 
-    'ema_fast_period': 20,     # 20 минут
-    'ema_slow_period': 120,    # 2 часа
+    # Окна для скользящих средних тренда (EMA_spread)
+    'ema_fast_period': 15,
+    'ema_slow_period': 90,
 
-    'sma_period': 60,          # 1 час
+    # Параметры Полос Боллинджера (BB_Position)
+    'bb_period': 30,
+    'bb_std_dev': 2.2,
 
-    'rsi_period': 30,
+    # Окна отклонения цены (Price Z-score)
+    'zscore_fast_period': 30,
+    'zscore_slow_period': 120,
 
-    'macd_signal_period': 15,
+    # Окно базового профиля объемов (volume_zscore)
+    'volume_window': 60,
 
-    'bb_period': 60,
-    'bb_std_dev': 2.5,
-
-    'adx_period': 30,
-
-    'obv_rolling_window': 30,
-    'chaikin_rolling_window': 60
+    # Окно сглаживания внутрисвечевой паники (parkinson_vol)
+    'parkinson_window': 20
 }
 
 # --- НАСТРОЙКИ МАСШТАБИРОВАНИЯ ---
@@ -48,7 +52,7 @@ MODEL_PARAMS = {
     'sequence_length': 120,  # Сколько свечей смотрим назад (память модели)
     'hidden_size': 128,       # Мощность памяти скрытого слоя
     'num_layers': 2,        # Количество слоев GRU
-    'output_size': 3,        # Предсказываем 1 число
+    'output_size': 3,        # Предсказываем 3 числа
     'dropout_rate': 0.25     # Доля случайно отключаемых нейронов во время тренировки
 }
 
@@ -89,9 +93,15 @@ DATA_FILE_NAME = f"{DATA_LOAD_PARAMS['ticker']}_{DATA_LOAD_PARAMS['interval']}.p
 DATA_FILE_PATH = os.path.join(DATA_DIR, DATA_FILE_NAME)
 
 # Итоговый файл со сгенерированными фичами и скейлингом
-CLEAN_TICKER = DATA_LOAD_PARAMS['ticker'].replace('-', '_')
+CLEAN_TICKER = DATA_LOAD_PARAMS['ticker'].replace("-", "_") # BTC-USDT -> BTC_USDT
+INTERVAL = DATA_LOAD_PARAMS['interval']
+
 FEATURES_FILE_NAME = f"{CLEAN_TICKER}_{DATA_LOAD_PARAMS['interval']}_features.parquet"
 FEATURES_FILE_PATH = os.path.join(DATA_DIR, FEATURES_FILE_NAME)
+
+# --- ДОБАВЛЯЕМ ДИНАМИЧЕСКИЕ ПУТИ ДЛЯ TRAIN / VAL ---
+TRAIN_FEATURES_PATH = os.path.join(DATA_DIR, f"{CLEAN_TICKER}_{INTERVAL}_train.parquet")
+VAL_FEATURES_PATH = os.path.join(DATA_DIR, f"{CLEAN_TICKER}_{INTERVAL}_val.parquet")
 
 # --- НАСТРОЙКИ ЛОГИРОВАНИЯ ---
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"

@@ -9,15 +9,14 @@ logger = logging.getLogger(__name__)
 
 class FeatureExtractor:
     """
-    Feature Engineering для BTC 5m.
-
-    Без Data Leakage.
-    Все признаки используют только прошлую информацию.
+    Высокоэффективный интрадей Feature Engineering для BTC/ETH 1m.
+    Итоговый набор из 15 изолированных признаков (консенсус ML-моделей).
+    Архитектура полностью динамическая — все окна вынесены в конфигурационный файл.
     """
 
     def __init__(self):
         self.params = FEATURE_PARAMS
-        self.col = self.params['target_column']
+        self.col = self.params['target_column']  # Ожидаем 'Close'
 
     def _calculate_ema(self, series, period):
         return series.ewm(span=period, adjust=False).mean()
@@ -29,191 +28,95 @@ class FeatureExtractor:
         initial_rows = len(df)
 
         logger.info(
-            "Запуск гибридного Feature Engineering (Stats + Tech)..."
+            "Запуск динамического интрадей Feature Engineering (Базис: 15 признаков)..."
         )
 
         try:
             df_f = pd.DataFrame(index=df.index)
 
             close = df[self.col]
+            open_p = df['Open']
+            high = df['High']
+            low = df['Low']
+            volume = df['Volume']
 
             # =====================================================
-            # БАЗОВАЯ ДОХОДНОСТЬ
+            # 1. RETURNS & MOMENTUM (5 признаков)
             # =====================================================
+            logret_1 = np.log(close / close.shift(1))
+            df_f['logret_1'] = logret_1
 
-            ret = close.pct_change()
-
-            df_f['Daily_Return'] = ret
-
-            # =====================================================
-            # MULTI-HORIZON RETURNS
-            # =====================================================
-
+            # Мульти-горизонты логарифмических доходностей
             for h in self.params['ret_horizons']:
-                df_f[f'ret_{h}'] = close.pct_change(h)
+                if h != 1:
+                    df_f[f'ret_{h}'] = np.log(close / close.shift(h))
 
             # =====================================================
-            # VOLATILITY
+            # 2. VOLATILITY & REGIME (4 признака)
             # =====================================================
+            df_f['vol_fast'] = logret_1.rolling(self.params['vol_fast_period']).std()
+            df_f['vol_slow'] = logret_1.rolling(self.params['vol_slow_period']).std()
 
-            df_f['vol_fast'] = (
-                ret
-                .rolling(self.params['vol_fast_period'])
-                .std()
-            )
+            # Отношение волатильностей (Режимный индикатор шума)
+            df_f['vol_ratio'] = df_f['vol_fast'] / df_f['vol_slow'].replace(0, 1e-8)
 
-            df_f['vol_slow'] = (
-                ret
-                .rolling(self.params['vol_slow_period'])
-                .std()
-            )
+            # Волатильность Паркинсона (Размах внутрисвечевой борьбы)
+            parkinson_raw = (np.log(high / low.replace(0, 1e-8)) ** 2) / (4 * np.log(2))
+            df_f['parkinson_vol'] = parkinson_raw.rolling(self.params['parkinson_window']).mean()
 
             # =====================================================
-            # PRICE Z-SCORE
+            # 3. MEAN REVERSION & POSITION (3 признака)
             # =====================================================
+            # Быстрый и медленный Price Z-Scores (Динамические имена фич)
+            mean_fast = close.rolling(self.params['zscore_fast_period']).mean()
+            std_fast = close.rolling(self.params['zscore_fast_period']).std()
+            df_f['price_zscore_fast'] = (close - mean_fast) / std_fast.replace(0, 1e-8)
 
-            mean_30 = close.rolling(30).mean()
-            std_30 = close.rolling(30).std()
+            mean_slow = close.rolling(self.params['zscore_slow_period']).mean()
+            std_slow = close.rolling(self.params['zscore_slow_period']).std()
+            df_f['price_zscore_slow'] = (close - mean_slow) / std_slow.replace(0, 1e-8)
 
-            df_f['price_zscore_30'] = (
-                (close - mean_30)
-                / std_30.replace(0, 1e-8)
-            )
+            # Bollinger Position (Считается строго по Close)
+            sma_bb = self._calculate_sma(close, self.params['bb_period'])
+            std_bb = close.rolling(self.params['bb_period']).std()
+            upper_bb = sma_bb + self.params['bb_std_dev'] * std_bb
+            lower_bb = sma_bb - self.params['bb_std_dev'] * std_bb
 
-            mean_120 = close.rolling(120).mean()
-            std_120 = close.rolling(120).std()
-
-            df_f['price_zscore_120'] = (
-                (close - mean_120)
-                / std_120.replace(0, 1e-8)
-            )
-
-            # =====================================================
-            # RANGE FEATURES
-            # =====================================================
-
-            range_pct = (
-                (df['High'] - df['Low'])
-                / close.replace(0, 1e-8)
-            )
-
-            df_f['range_pct'] = range_pct
-
-            df_f['range_ma'] = range_pct.rolling(24).mean()
-
-            # =====================================================
-            # EMA TREND
-            # =====================================================
-
-            ema_fast = self._calculate_ema(
-                ret,
-                self.params['ema_fast_period']
-            )
-
-            ema_slow = self._calculate_ema(
-                ret,
-                self.params['ema_slow_period']
-            )
-
-            df_f['EMA_spread'] = ema_fast - ema_slow
-
-            # =====================================================
-            # RSI
-            # =====================================================
-
-            delta = ret.diff()
-
-            gain = (
-                delta.clip(lower=0)
-                .ewm(
-                    span=self.params['rsi_period'],
-                    adjust=False
-                )
-                .mean()
-            )
-
-            loss = (
-                -delta.clip(upper=0)
-                .ewm(
-                    span=self.params['rsi_period'],
-                    adjust=False
-                )
-                .mean()
-            )
-
-            rs = gain / loss.replace(0, 1e-8)
-
-            rsi = 100 - (100 / (1 + rs))
-
-            df_f['RSI_Norm'] = (rsi - 50) / 100
-
-            # =====================================================
-            # MACD
-            # =====================================================
-
-            macd_line = ema_fast - ema_slow
-
-            signal_line = macd_line.ewm(
-                span=self.params['macd_signal_period'],
-                adjust=False
-            ).mean()
-
-            df_f['MACD_Hist'] = macd_line - signal_line
-
-            # =====================================================
-            # BOLLINGER POSITION
-            # =====================================================
-
-            sma_ret = self._calculate_sma(
-                ret,
-                self.params['sma_period']
-            )
-
-            std_ret = ret.rolling(
-                self.params['bb_period']
-            ).std()
-
-            upper_bb = (
-                sma_ret
-                + self.params['bb_std_dev'] * std_ret
-            )
-
-            lower_bb = (
-                sma_ret
-                - self.params['bb_std_dev'] * std_ret
-            )
-
-            bb_pos = (
-                (ret - lower_bb)
-                / (upper_bb - lower_bb)
-                .replace(0, 1e-8)
-            )
-
+            bb_pos = (close - lower_bb) / (upper_bb - lower_bb).replace(0, 1e-8)
             df_f['BB_Position'] = bb_pos.clip(-1, 2)
 
             # =====================================================
-            # CLEANING
+            # 4. TREND & STRUCTURE (2 признака)
             # =====================================================
+            # Логарифмический EMA спред от цены
+            ema_fast = self._calculate_ema(close, self.params['ema_fast_period'])
+            ema_slow = self._calculate_ema(close, self.params['ema_slow_period'])
+            df_f['EMA_spread'] = np.log(ema_fast / ema_slow.replace(0, 1e-8))
 
-            df_clean = (
-                df_f
-                .replace([np.inf, -np.inf], np.nan)
-                .dropna()
-            )
+            # Направление давления внутри свечи (тело свечи)
+            df_f['body_pct'] = (close - open_p) / open_p.replace(0, 1e-8)
 
+            # =====================================================
+            # 5. VOLUME DYNAMICS (1 признака)
+            # =====================================================
+            vol_mean = volume.rolling(self.params['volume_window']).mean()
+            vol_std = volume.rolling(self.params['volume_window']).std()
+            df_f['volume_zscore'] = (volume - vol_mean) / vol_std.replace(0, 1e-8)
+
+            # =====================================================
+            # CLEANING & DROPPING
+            # =====================================================
+            df_clean = df_f.replace([np.inf, -np.inf], np.nan).dropna()
             dropped_rows = initial_rows - len(df_clean)
 
             logger.info(
-                f"Генерация фич завершена. "
-                f"Признаков: {df_clean.shape[1]}. "
-                f"Удалено строк: {dropped_rows}"
+                f"Генерация фич успешно завершена.\n"
+                f" -> Итого чистых признаков в матрице: {df_clean.shape[1]} (Ровно 15 без дубликатов)\n"
+                f" -> Удалено начальных строк разгона: {dropped_rows}"
             )
 
             return df_clean
 
         except Exception as e:
-            logger.error(
-                f"Ошибка FeatureExtractor: {e}",
-                exc_info=True
-            )
+            logger.error(f"Ошибка в модуле FeatureExtractor: {e}", exc_info=True)
             return pd.DataFrame()

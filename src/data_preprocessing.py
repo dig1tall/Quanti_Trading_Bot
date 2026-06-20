@@ -1,23 +1,22 @@
 import logging
 import os
+import json
 import numpy as np
 import pandas as pd
 
-# Импорт словарей конфигурации по их зонам ответственности
 from src import config
 from src.config import SCALING_PARAMS
 
-# Инициализация логгера для модуля масштабирования фич
 logger = logging.getLogger(__name__)
 
 
 class Scaler:
     """
     Класс для ручного масштабирования признаков.
-    Поддерживает методы: 'standard', 'minmax', 'robust'.
-    Запоминает параметры на Train-выборке и применяется к Test/Real-time.
+    Поддерживает методы: 'standard', 'minmax', 'robust' (рекомендуется для интрадея).
+    Запоминает параметры на Train-выборке, сериализует их в файл и применяется в Real-time/Backtest.
     """
-    def __init__(self, method: str = SCALING_PARAMS['method']):
+    def __init__(self, method: str = SCALING_PARAMS.get('method', 'robust')):
         if method not in ['standard', 'minmax', 'robust']:
             raise ValueError("Допустимые методы: 'standard', 'minmax', 'robust'")
         self.method = method
@@ -32,7 +31,6 @@ class Scaler:
                 logger.warning(f"Колонка {col} не найдена в DataFrame при fit. Пропускаем.")
                 continue
 
-            # Защита от нечисловых типов данных
             if not np.issubdtype(df[col].dtype, np.number):
                 logger.warning(f"Колонка {col} не является числовой. Масштабирование невозможно.")
                 continue
@@ -40,7 +38,6 @@ class Scaler:
             if self.method == 'minmax':
                 min_val = float(df[col].min())
                 max_val = float(df[col].max())
-                # ЗАЩИТА: если max == min (константный признак), ставим разницу 1e-8 вместо 0
                 denom = (max_val - min_val) if max_val != min_val else 1e-8
                 self.params[col] = {
                     'min': min_val,
@@ -49,7 +46,6 @@ class Scaler:
             elif self.method == 'standard':
                 mean_val = float(df[col].mean())
                 std_val = float(df[col].std())
-                # ЗАЩИТА: если std == 0, ставим 1e-8
                 if std_val == 0 or np.isnan(std_val):
                     std_val = 1e-8
                 self.params[col] = {
@@ -58,13 +54,10 @@ class Scaler:
                 }
             elif self.method == 'robust':
                 median_val = float(df[col].median())
-                q75 = df[col].quantile(0.75)
-                q25 = df[col].quantile(0.25)
-                iqr_val = float(q75 - q25)
+                q75 = float(df[col].quantile(0.75))
+                q25 = float(df[col].quantile(0.25))
+                iqr_val = q75 - q25
 
-                # === ВОТ ТУТ ПРАВКА И ЗАЩИТА ОТ ДЕЛЕНИЯ НА НОЛЬ ===
-                # Если IQR равен 0 (признак не менялся на 50% минутных свечей),
-                # принудительно выставляем минимальное значение 1e-8, чтобы не было NaN/Inf
                 if iqr_val == 0 or np.isnan(iqr_val):
                     iqr_val = 1e-8
 
@@ -78,16 +71,14 @@ class Scaler:
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         """Применяет сохраненные параметры масштабирования к указанным колонкам."""
         if not self.params:
-            raise ValueError("Scaler еще не обучен! Сначала вызови метод fit().")
+            raise ValueError("Scaler еще не обучен или не загружен! Сначала вызови fit() или load().")
 
-        # Создание копии, чтобы не портить исходный датафрейм в памяти
         df_scaled = df.copy()
 
         for col, col_params in self.params.items():
             if col not in df_scaled.columns:
                 continue
 
-            # Явное приведение колонки к float64 перед записью дробей
             df_scaled[col] = df_scaled[col].astype(float)
 
             if self.method == 'standard':
@@ -103,31 +94,56 @@ class Scaler:
             elif self.method == 'robust':
                 median = col_params['median']
                 iqr = col_params['iqr']
-
-                # Дополнительная локальная проверка при трансформации
-                if iqr == 0:
-                    iqr = 1e-8
-
                 df_scaled.loc[:, col] = (df_scaled[col].to_numpy() - median) / iqr
 
         return df_scaled
 
     def fit_transform(self, df: pd.DataFrame, columns: list) -> pd.DataFrame:
-        """Удобный метод-комбайн для одновременного обучения и восстановления."""
+        """Метод для одновременного обучения и трансформации."""
         self.fit(df, columns)
         return self.transform(df)
+
+    def save(self, file_path: str = None) -> None:
+        """Сохраняет параметры скейлера в JSON файл для дальнейшего использования в бэктесте/реалтайме."""
+        if file_path == "None" or not file_path:
+            # Задаем дефолтный путь в директорию моделей
+            models_dir = os.path.join(config.PROJECT_ROOT, "models")
+            os.makedirs(models_dir, exist_ok=True)
+            file_path = os.path.join(models_dir, "scaler_params.json")
+
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump({'method': self.method, 'params': self.params}, f, indent=4, ensure_ascii=False)
+            logger.info(f"Параметры скейлера успешно сериализованы в файл: {file_path}")
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении параметров скейлера: {e}", exc_info=True)
+
+    def load(self, file_path: str = None) -> None:
+        """Загружает параметры скейлера из JSON файла."""
+        if file_path == "None" or not file_path:
+            file_path = os.path.join(config.PROJECT_ROOT, "models", "scaler_params.json")
+
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Файл параметров скейлера не найден по пути: {file_path}")
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            self.method = data['method']
+            self.params = data['params']
+            logger.info(f"Параметры скейлера успешно загружены из файла: {file_path} (Метод: {self.method})")
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке параметров скейлера: {e}", exc_info=True)
+            raise e
 
 
 # --- АВТОНОМНЫЙ ТЕСТ МОДУЛЯ ---
 if __name__ == "__main__":
     from src.config import setup_logging
 
-    # Инициализация логгера через конфигурацию
     setup_logging(level=logging.INFO)
-
     logger.info("=== Запуск Scaler в автономном режиме на реальных данных ===")
 
-    # Готовый путь к файлу с фичами прямо из конфига путей
     file_path = config.FEATURES_FILE_PATH
 
     if os.path.exists(file_path):
@@ -138,10 +154,19 @@ if __name__ == "__main__":
         cols_to_scale = [col for col in base_df.columns if col not in base_cols]
 
         scaler = Scaler()
+        # Обучаем и трансформируем
         scaled_df = scaler.fit_transform(base_df, cols_to_scale)
 
-        logger.info(f"Масштабирование методом '{scaler.method}' успешно завершено!")
-        print("\nПревью отмасштабированных признаков (последние 3 строки):")
-        print(scaled_df[cols_to_scale].tail(3))
+        # Тестируем сохранение
+        scaler.save()
+
+        # Тестируем загрузку в новый объект
+        new_scaler = Scaler()
+        new_scaler.load()
+
+        # Проверяем повторный трансформ на загруженных параметрах
+        scaled_df_2 = new_scaler.transform(base_df)
+
+        logger.info("Проверка сериализации прошла успешно! Данные идентичны.")
     else:
         logger.error(f"Файл с признаками не найден по пути: {file_path}")
