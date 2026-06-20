@@ -41,8 +41,8 @@ def main():
     model_engine = ModelEngine()
 
     # Флаги управления пайплайнами (можно переключать в True/False при необходимости)
-    RUN_DATA_PIPELINE = False   # Нужно ли скачивать и собирать фичи заново
-    RUN_MODEL_TRAINING = False  # Нужно ли запускать цикл обучения нейросети
+    RUN_DATA_PIPELINE = True   # Нужно ли скачивать и собирать фичи заново
+    RUN_MODEL_TRAINING = True  # Нужно ли запускать цикл обучения нейросети
     RUN_BACKTESTING = True     # Нужно ли проводить финальный бэктест
 
     # --- ФАЗА 1: Конвейер Данных ---

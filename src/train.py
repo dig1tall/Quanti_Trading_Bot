@@ -15,19 +15,7 @@ from src.model import QuantiGRU
 logger = logging.getLogger(__name__)
 
 def train_model():
-    logger.info("=== Запуск промышленного процесса обучения QuantiGRU Ver 1.1.0 ===")
-
-    # 1. ПОЛНАЯ ФИКСАЦИЯ СТЕКА (Режим 100% воспроизводимости)
-    seed = 42
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    logger.info(f"Стек детерминирован. Seed зафиксирован на отметке: {seed}")
+    logger.info("=== Запуск промышленного процесса обучения QuantiGRU ===")
 
     # 2. Определение устройства вычислений
     device = torch.device(TRAINING_PARAMS['device'] if torch.cuda.is_available() else 'cpu')
@@ -42,13 +30,19 @@ def train_model():
     # Выводим распределение классов
     logger.info("--- Баланс классов в сырых датасетах ---")
     for name, loader in [("Train", train_loader), ("Validation", val_loader)]:
-        targets = loader.dataset.targets[MODEL_PARAMS['sequence_length']:]
+        # Если в датасете есть явный вектор таргетов для окон, берем его, иначе считаем по сырым с учетом сдвига
+        if hasattr(loader.dataset, 'active_targets'):
+            targets = loader.dataset.active_targets
+        else:
+            # Безопасный фолбэк: берем таргеты, которые соответствуют индексам окон
+            seq_len = MODEL_PARAMS['sequence_length']
+            targets = loader.dataset.targets[seq_len : seq_len + len(loader.dataset)]
+
         unique, counts = np.unique(targets, return_counts=True)
         total = len(targets)
         dist_str = ", ".join([f"Класс {k}: {v/total*100:.1f}%" for k, v in zip(unique, counts)])
         logger.info(f" -> {name}: {dist_str}")
 
-    # Извлекаем имена фич и их количество
     feature_names = train_loader.dataset.feature_names
     input_size = len(feature_names)
 
@@ -67,8 +61,8 @@ def train_model():
 
     optimizer = optim.AdamW(
         model.parameters(),
-        lr=3e-4,  # Мягкий и стабильный шаг для финансовых рядов
-        weight_decay=1e-4
+        lr=TRAINING_PARAMS['lr'],
+        weight_decay=TRAINING_PARAMS['weight_decay']
     )
 
     # Следим за максимизацией метрики, поэтому mode='max' для планировщика по F1
