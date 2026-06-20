@@ -1,131 +1,219 @@
 import logging
 import numpy as np
 import pandas as pd
-import os
 
-from src import config
 from src.config import FEATURE_PARAMS
 
 logger = logging.getLogger(__name__)
 
+
 class FeatureExtractor:
     """
-    Модернизированный Feature Engineering пайплайн для 1-минутных свечей.
-    Полностью исключает Data Leakage и абсолютные ценовые уровни.
-    """
-    def __init__(self):
-        self.col      = FEATURE_PARAMS['target_column'] # Ожидается 'Close'
-        self.ema_fast = FEATURE_PARAMS['ema_fast_period']
-        self.ema_slow = FEATURE_PARAMS['ema_slow_period']
-        self.sma_per  = FEATURE_PARAMS['sma_period']
-        self.rsi_per  = FEATURE_PARAMS['rsi_period']
-        self.macd_sig = FEATURE_PARAMS['macd_signal_period']
-        self.bb_per   = FEATURE_PARAMS['bb_period']
-        self.bb_std   = FEATURE_PARAMS['bb_std_dev']
-        self.adx_per        = FEATURE_PARAMS['adx_period']
-        self.obv_window     = FEATURE_PARAMS['obv_rolling_window']
-        self.chaikin_window = FEATURE_PARAMS['chaikin_rolling_window']
+    Feature Engineering для BTC 5m.
 
-    def _calculate_ema(self, series: pd.Series, period: int) -> pd.Series:
+    Без Data Leakage.
+    Все признаки используют только прошлую информацию.
+    """
+
+    def __init__(self):
+        self.params = FEATURE_PARAMS
+        self.col = self.params['target_column']
+
+    def _calculate_ema(self, series, period):
         return series.ewm(span=period, adjust=False).mean()
 
-    def _calculate_sma(self, series: pd.Series, period: int) -> pd.Series:
+    def _calculate_sma(self, series, period):
         return series.rolling(window=period).mean()
-
-    def _calculate_rsi_from_returns(self, returns: pd.Series, period: int) -> pd.Series:
-        """RSI, адаптированный для стационарных доходностей."""
-        delta = returns.diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-
-        avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
-        avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
-
-        rs = avg_gain / avg_loss.replace(0, 1e-8)
-        rsi = 100 - (100 / (1 + rs))
-        return (rsi.fillna(50) - 50) / 100
-
-    def _calculate_adx_from_returns(self, df_norm: pd.DataFrame, period: int) -> pd.Series:
-        """Безопасный расчет ADX на базе нормализованных приращений High/Low."""
-        high_ret = df_norm['High_dist']
-        low_ret = df_norm['Low_dist']
-
-        up_move = high_ret.diff()
-        down_move = low_ret.diff()
-
-        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0), index=df_norm.index)
-        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0), index=df_norm.index)
-
-        plus_di = plus_dm.ewm(span=period, adjust=False).mean()
-        minus_di = minus_dm.ewm(span=period, adjust=False).mean()
-
-        denom = (plus_di + minus_di).replace(0, 1e-8)
-        raw_dx = (plus_di - minus_di).abs() / denom
-        adx = raw_dx.ewm(span=period, adjust=False).mean()
-        return adx
 
     def extract_features(self, df: pd.DataFrame) -> pd.DataFrame:
         initial_rows = len(df)
-        logger.info("Запуск очищенного Feature Engineering пайплайна (HFT 1m)...")
+
+        logger.info(
+            "Запуск гибридного Feature Engineering (Stats + Tech)..."
+        )
 
         try:
-            df_features = pd.DataFrame(index=df.index)
+            df_f = pd.DataFrame(index=df.index)
 
-            # 1. Генерируем базовый стационарный фундамент (Процентные изменения)
-            df_features['Daily_Return'] = df[self.col].pct_change().fillna(0)
+            close = df[self.col]
 
-            # ФИКС: Объявляем ret сразу, чтобы использовать его в волатильности ниже
-            ret = df_features['Daily_Return']
+            # =====================================================
+            # БАЗОВАЯ ДОХОДНОСТЬ
+            # =====================================================
 
-            # Нормируем High и Low относительно Close текущей свечи (в % выражении)
-            df_norm = pd.DataFrame(index=df.index)
-            df_norm['High_dist'] = (df['High'] - df[self.col]) / df[self.col]
-            df_norm['Low_dist']  = (df['Low'] - df[self.col]) / df[self.col]
+            ret = close.pct_change()
 
-            # Вместо объемов берем волатильность разной длины
-            df_features['Volatility_Fast'] = ret.rolling(window=10).std().fillna(0)
-            df_features['Volatility_Slow'] = ret.rolling(window=60).std().fillna(0)
+            df_f['Daily_Return'] = ret
 
-            # 2. РАСЧЕТ ФОРВАРДНОГО ТАРГЕТА
+            # =====================================================
+            # MULTI-HORIZON RETURNS
+            # =====================================================
 
+            for h in self.params['ret_horizons']:
+                df_f[f'ret_{h}'] = close.pct_change(h)
 
-            # 3. ТРЕНДЫ И ИМПУЛЬС НА БАЗЕ ДОХОДНОСТЕЙ
-            df_features[f'EMA_{self.ema_fast}'] = self._calculate_ema(ret, self.ema_fast)
-            df_features[f'EMA_{self.ema_slow}'] = self._calculate_ema(ret, self.ema_slow)
-            df_features[f'SMA_{self.sma_per}']  = self._calculate_sma(ret, self.sma_per)
-            df_features['EMA_spread'] = df_features[f'EMA_{self.ema_fast}'] - df_features[f'EMA_{self.ema_slow}']
+            # =====================================================
+            # VOLATILITY
+            # =====================================================
 
-            # RSI от доходностей (масштабированный)
-            df_features['RSI_Norm'] = self._calculate_rsi_from_returns(ret, self.rsi_per)
+            df_f['vol_fast'] = (
+                ret
+                .rolling(self.params['vol_fast_period'])
+                .std()
+            )
 
-            # MACD от доходностей
-            macd_line = df_features[f'EMA_{self.ema_fast}'] - df_features[f'EMA_{self.ema_slow}']
-            signal_line = macd_line.ewm(span=self.macd_sig, adjust=False).mean()
-            df_features['MACD_Hist'] = macd_line - signal_line
+            df_f['vol_slow'] = (
+                ret
+                .rolling(self.params['vol_slow_period'])
+                .std()
+            )
 
-            # Волатильность (Rolling Standard Deviation)
-            df_features['Volatility'] = ret.rolling(window=self.sma_per).std().fillna(0)
+            # =====================================================
+            # PRICE Z-SCORE
+            # =====================================================
 
-            # Положение внутри Полос Боллинджера (для доходностей)
-            sma_ret = df_features[f'SMA_{self.sma_per}']
-            std_ret = ret.rolling(window=self.bb_per).std()
-            upper_bb = sma_ret + (std_ret * self.bb_std)
-            lower_bb = sma_ret - (std_ret * self.bb_std)
-            df_features['BB_Position'] = (ret - lower_bb) / (upper_bb - lower_bb).replace(0, 1e-8)
-            df_features['BB_Position'] = df_features['BB_Position'].fillna(0.5)
+            mean_30 = close.rolling(30).mean()
+            std_30 = close.rolling(30).std()
 
-            # Сила тренда из нормализованных приращений
-            df_features['Trend_Strength'] = self._calculate_adx_from_returns(df_norm, self.adx_per).fillna(0)
+            df_f['price_zscore_30'] = (
+                (close - mean_30)
+                / std_30.replace(0, 1e-8)
+            )
 
-            # Финальная чистка
-            df_clean = df_features.replace([np.inf, -np.inf], np.nan)
-            df_clean = df_clean.dropna()
+            mean_120 = close.rolling(120).mean()
+            std_120 = close.rolling(120).std()
+
+            df_f['price_zscore_120'] = (
+                (close - mean_120)
+                / std_120.replace(0, 1e-8)
+            )
+
+            # =====================================================
+            # RANGE FEATURES
+            # =====================================================
+
+            range_pct = (
+                (df['High'] - df['Low'])
+                / close.replace(0, 1e-8)
+            )
+
+            df_f['range_pct'] = range_pct
+
+            df_f['range_ma'] = range_pct.rolling(24).mean()
+
+            # =====================================================
+            # EMA TREND
+            # =====================================================
+
+            ema_fast = self._calculate_ema(
+                ret,
+                self.params['ema_fast_period']
+            )
+
+            ema_slow = self._calculate_ema(
+                ret,
+                self.params['ema_slow_period']
+            )
+
+            df_f['EMA_spread'] = ema_fast - ema_slow
+
+            # =====================================================
+            # RSI
+            # =====================================================
+
+            delta = ret.diff()
+
+            gain = (
+                delta.clip(lower=0)
+                .ewm(
+                    span=self.params['rsi_period'],
+                    adjust=False
+                )
+                .mean()
+            )
+
+            loss = (
+                -delta.clip(upper=0)
+                .ewm(
+                    span=self.params['rsi_period'],
+                    adjust=False
+                )
+                .mean()
+            )
+
+            rs = gain / loss.replace(0, 1e-8)
+
+            rsi = 100 - (100 / (1 + rs))
+
+            df_f['RSI_Norm'] = (rsi - 50) / 100
+
+            # =====================================================
+            # MACD
+            # =====================================================
+
+            macd_line = ema_fast - ema_slow
+
+            signal_line = macd_line.ewm(
+                span=self.params['macd_signal_period'],
+                adjust=False
+            ).mean()
+
+            df_f['MACD_Hist'] = macd_line - signal_line
+
+            # =====================================================
+            # BOLLINGER POSITION
+            # =====================================================
+
+            sma_ret = self._calculate_sma(
+                ret,
+                self.params['sma_period']
+            )
+
+            std_ret = ret.rolling(
+                self.params['bb_period']
+            ).std()
+
+            upper_bb = (
+                sma_ret
+                + self.params['bb_std_dev'] * std_ret
+            )
+
+            lower_bb = (
+                sma_ret
+                - self.params['bb_std_dev'] * std_ret
+            )
+
+            bb_pos = (
+                (ret - lower_bb)
+                / (upper_bb - lower_bb)
+                .replace(0, 1e-8)
+            )
+
+            df_f['BB_Position'] = bb_pos.clip(-1, 2)
+
+            # =====================================================
+            # CLEANING
+            # =====================================================
+
+            df_clean = (
+                df_f
+                .replace([np.inf, -np.inf], np.nan)
+                .dropna()
+            )
 
             dropped_rows = initial_rows - len(df_clean)
-            logger.info(f"Генерация фич завершена. Удалено строк с NaN/Inf: {dropped_rows}. Строк на выходе: {len(df_clean)}")
+
+            logger.info(
+                f"Генерация фич завершена. "
+                f"Признаков: {df_clean.shape[1]}. "
+                f"Удалено строк: {dropped_rows}"
+            )
 
             return df_clean
 
         except Exception as e:
-            logger.error(f"Критический сбой в FeatureExtractor: {e}", exc_info=True)
+            logger.error(
+                f"Ошибка FeatureExtractor: {e}",
+                exc_info=True
+            )
             return pd.DataFrame()

@@ -15,10 +15,8 @@ logger = logging.getLogger(__name__)
 class DataLoader:
     """
     Класс для загрузки, очистки и сохранения исторических рыночных данных через CCXT (Bybit).
-    Полностью сохраняет интерфейс оригинального yfinance-загрузчика.
     """
     def __init__(self, ticker: str = None, interval: str = None, period: str = None):
-        # Сохраняем совместимость по сигнатуре
         self.ticker   = ticker if ticker is not None else DATA_LOAD_PARAMS['ticker']
         self.interval = interval if interval is not None else DATA_LOAD_PARAMS['interval']
         self.period   = period if period is not None else DATA_LOAD_PARAMS['period']
@@ -95,7 +93,7 @@ class DataLoader:
             if not all_candles:
                 raise ValueError(f"Биржа не вернула данные для {self.symbol}.")
 
-            # Формируем DataFrame в точности как это делал yfinance
+            # Формируем DataFrame
             df = pd.DataFrame(all_candles, columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
             df['Date'] = pd.to_datetime(df['Date'], unit='ms', utc=True)
             df.set_index('Date', inplace=True)
@@ -115,7 +113,7 @@ class DataLoader:
             return pd.DataFrame()
 
     def save_to_parquet(self, df: pd.DataFrame) -> None:
-        """Публичный изолированный метод для записи DataFrame. Остался неизменным."""
+        """Публичный изолированный метод для записи DataFrame."""
         if df.empty:
             logger.warning("Попытка сохранить пустой DataFrame. Пропускаем запись.")
             return
