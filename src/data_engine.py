@@ -55,20 +55,23 @@ class DataEngine:
             logger.error("Сбой на этапе генерации признаков. Пайплайн остановлен.")
             return
 
-        if 'logret_1' not in df_features.columns:
-            raise KeyError("Критическая ошибка: колонка 'Daily_Return' не найдена после FeatureExtractor!")
-
-        # 4. Расчет сырого интрадей-таргета (Будущее скользящее среднее доходностей)
+        # 4. Расчет сырого интрадей-таргета (Чистый Log-Return за forward_horizon баров вперед)
         forward_horizon = FEATURE_PARAMS.get('forward_horizon', 5)
-        logger.info(f"Расчет сырых таргетов на горизонте {forward_horizon}м...")
+        logger.info(f"Расчет чистых сырых таргетов на горизонте {forward_horizon}м через сумму лог-доходностей...")
+
+        if 'logret_1' not in df_features.columns:
+            raise KeyError("Критическая ошибка: колонка 'logret_1' не найдена после FeatureExtractor!")
 
         returns = df_features['logret_1'].values
-        raw_targets = np.zeros_like(returns, dtype=np.float32)
+        n_rows = len(df_features)
+        raw_targets = np.zeros(n_rows, dtype=np.float32)
 
-        # Считаем среднюю доходность на n свечей вперед
-        for i in range(len(returns) - forward_horizon):
-            raw_targets[i] = np.mean(returns[i + 1 : i + 1 + forward_horizon])
+        # Математически: сумма лог-доходностей следующих N свечей равна полному лог-ретурну за этот период
+        for i in range(n_rows - forward_horizon):
+            raw_targets[i] = np.sum(returns[i + 1 : i + 1 + forward_horizon])
 
+        # Последние forward_horizon строк гарантированно оставляем нулевыми
+        raw_targets[-forward_horizon:] = 0.0
         df_features['raw_target'] = raw_targets
 
         # ---- ПРАВИЛЬНЫЙ РАЗДЕЛЬНЫЙ СКЕЙЛИНГ И ТАРГЕТИНГ ----
@@ -82,14 +85,14 @@ class DataEngine:
         df_train = df_features.iloc[:split_idx].copy()
         df_val = df_features.iloc[split_idx:].copy()
 
-        # 5. Разметка классов на основе КВАНТИЛЕЙ ТРЕЙНА (Защита от утечки будущего)
-        logger.info("Вычисление порогов классов по обучающей выборке...")
-        # Убираем последние n свечей из расчета квантилей трейна, так как на хвосте сырой таргет равен 0
+        # 5. Разметка классов на основе КВАНТИЛЕЙ ТРЕЙНА (По совету GPT: 25% / 50% / 25%)
+        logger.info("Вычисление порогов классов по квантилям обучающей выборки...")
         train_raw_targets_clean = df_train['raw_target'].values[:-forward_horizon]
 
-        lower_threshold = float(np.quantile(train_raw_targets_clean, 0.35))
-        upper_threshold = float(np.quantile(train_raw_targets_clean, 0.65))
-        logger.info(f"Пороги классов зафиксированы: Шорт < {lower_threshold:.6f}, Лонг > {upper_threshold:.6f}")
+        # Жесткие квантили отсекают 50% центрального шума во флэт
+        lower_threshold = float(np.quantile(train_raw_targets_clean, 0.25))
+        upper_threshold = float(np.quantile(train_raw_targets_clean, 0.75))
+        logger.info(f"Пороги классов зафиксированы (квантили 0.25/0.75): Шорт < {lower_threshold:.6f}, Лонг > {upper_threshold:.6f}")
 
         # Создаем пустые массивы для меток (1 — Флэт/Боковик по умолчанию)
         df_train['target'] = np.ones(len(df_train), dtype=np.int64)
@@ -113,7 +116,7 @@ class DataEngine:
 
         # Обучаем скейлер только на Train, сохраняем параметры на диск и трансформируем обе выборки
         self.scaler.fit(df_train, cols_to_scale)
-        self.scaler.save() # Запись scaler_params.json в папку models
+        self.scaler.save()  # Запись scaler_params.json в папку models
 
         df_train_scaled = self.scaler.transform(df_train)
         df_val_scaled = self.scaler.transform(df_val)

@@ -30,11 +30,9 @@ def train_model():
     # Выводим распределение классов
     logger.info("--- Баланс классов в сырых датасетах ---")
     for name, loader in [("Train", train_loader), ("Validation", val_loader)]:
-        # Если в датасете есть явный вектор таргетов для окон, берем его, иначе считаем по сырым с учетом сдвига
         if hasattr(loader.dataset, 'active_targets'):
             targets = loader.dataset.active_targets
         else:
-            # Безопасный фолбэк: берем таргеты, которые соответствуют индексам окон
             seq_len = MODEL_PARAMS['sequence_length']
             targets = loader.dataset.targets[seq_len : seq_len + len(loader.dataset)]
 
@@ -55,8 +53,10 @@ def train_model():
         dropout_rate=MODEL_PARAMS['dropout_rate']
     ).to(device)
 
-    # 5. Оптимизаторы и Лосс (LR скорректирован на 3e-4 по рекомендации)
-    smoothing = MODEL_PARAMS.get('label_smoothing', 0.0)
+    # 5. Оптимизаторы и Лосс
+    # ВРЕМЕННО: принудительно зануляем сглаживание для тестирования чистых вероятностей,
+    # игнорируя 0.05 из конфига. Когда таргет стабилизируется, вернешь обратно MODEL_PARAMS.get('label_smoothing', 0.0)
+    smoothing = 0.0 #TRAINING_PARAMS['label_smoothing']
     criterion = nn.CrossEntropyLoss(label_smoothing=smoothing)
 
     optimizer = optim.AdamW(
@@ -65,7 +65,6 @@ def train_model():
         weight_decay=TRAINING_PARAMS['weight_decay']
     )
 
-    # Следим за максимизацией метрики, поэтому mode='max' для планировщика по F1
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='max', factor=0.5, patience=3
     )
@@ -75,13 +74,14 @@ def train_model():
 
     epochs = TRAINING_PARAMS['epochs']
 
-    # КРИТЕРИЙ УСПЕХА: Теперь ищем максимум по Macro F1
-    best_val_macro_f1 = float('-inf')
+    # КРИТЕРИЙ УСПЕХА: Ищем максимум по Combo Score
+    best_combo_score = float('-inf')
     patience = TRAINING_PARAMS['patience']
     patience_counter = 0
     best_epoch = 0
+    delta = TRAINING_PARAMS['min_delta']
 
-    logger.info(f"Параметры: Эпох={epochs} | Оптимизатор=AdamW (LR=3e-4) | Критерий Early Stopping = Val Macro F1")
+    logger.info(f"Параметры: Эпох={epochs} | Оптимизатор=AdamW (LR={TRAINING_PARAMS['lr']}) | Критерий Early Stopping = Combo Score (delta={delta})")
 
     # 6. Главный цикл обучения
     for epoch in range(1, epochs + 1):
@@ -150,33 +150,34 @@ def train_model():
         # Считаем метрики качества сигналов
         val_accuracy = (np.array(all_preds) == np.array(all_targets)).mean() * 100
         val_macro_f1 = f1_score(all_targets, all_preds, average='macro')
-
-        # Считаем Trading F1 строго по классам 0 (Short) и 2 (Long), игнорируя боковик
         val_trading_f1 = f1_score(all_targets, all_preds, labels=[0, 2], average='macro')
+
+        # РАСЧЕТ КОМБИНИРОВАННОГО СКОРА ДЛЯ КВАНТ-ОТБОРА
+        current_score = 0.7 * val_trading_f1 + 0.3 * val_macro_f1
         mean_confidence = np.mean(all_confidences)
 
         current_lr = optimizer.param_groups[0]['lr']
-
-        # Шаг планировщика теперь завязан на максимизацию Macro F1
-        scheduler.step(val_macro_f1)
+        scheduler.step(current_score)
 
         logger.info(
             f"Эпоха [{epoch:02d}/{epochs:02d}] | LR: {current_lr:.6f} | "
             f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
-            f"Val Acc: {val_accuracy:.2f}% | **Val Macro F1: {val_macro_f1:.4f}** | "
-            f"Trading F1: {val_trading_f1:.4f} | Conf: {mean_confidence:.3f}"
+            f"Macro F1: {val_macro_f1:.4f} | Trading F1: {val_trading_f1:.4f} | "
+            f"**Combo Score: {current_score:.4f}** | Conf: {mean_confidence:.3f}"
         )
 
-        # Контроль Early Stopping строго по максимуму VAL MACRO F1
-        if val_macro_f1 > best_val_macro_f1:
-            best_val_macro_f1 = val_macro_f1
+        # Честная проверка улучшения с учетом жесткого шага delta
+        if current_score > (best_combo_score + delta):
+            # Считаем чистый шаг прогресса относительно старого рекорда (для первой эпохи это текущий скор)
+            improvement = current_score - (best_combo_score if best_combo_score != float('-inf') else 0.0)
+
+            best_combo_score = current_score
             best_epoch = epoch
             patience_counter = 0
 
-            # Генерируем Confusion Matrix для полной диагностики деградации классов
             cm = confusion_matrix(all_targets, all_preds)
             cm_text = (
-                f"\n--- Матрица ошибок (Confusion Matrix) для Лучшей Эпохи {epoch} ---\n"
+                f"\n--- Матрица ошибок для Лучшей Эпохи {epoch} (Combo Score: {current_score:.4f}) ---\n"
                 f"            Предсказано\n"
                 f"            Short  Flat   Long\n"
                 f"Факт Short:  {cm[0][0]:<5}  {cm[0][1]:<5}  {cm[0][2]:<5}\n"
@@ -186,7 +187,6 @@ def train_model():
             )
             logger.info(cm_text)
 
-            # Сохраняем расширенный чекпоинт, включая список фич
             checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -194,7 +194,8 @@ def train_model():
                 'val_loss': val_loss,
                 'val_macro_f1': val_macro_f1,
                 'val_trading_f1': val_trading_f1,
-                'feature_names': feature_names,  # Защита от склероза через месяц!
+                'combo_score': current_score,
+                'feature_names': feature_names,
                 'lr': current_lr
             }
 
@@ -202,16 +203,18 @@ def train_model():
             os.makedirs(models_dir, exist_ok=True)
             model_path = os.path.join(models_dir, "best_quanti_model.pth")
             torch.save(checkpoint, model_path)
-            logger.info(f" -> [Запись Чекпоинта] Обновлен максимум Macro F1: {val_macro_f1:.4f}")
+            logger.info(f" -> [Запись Чекпоинта] Подтверждено улучшение на +{improvement:.4f}. Модель сохранена.")
         else:
             patience_counter += 1
+            if current_score > best_combo_score:
+                logger.info(f" -> Скор {current_score:.4f} выше лучшего ({best_combo_score:.4f}), но шаг прироста меньше delta ({delta}). Игнорируем.")
 
         if patience_counter >= patience:
-            logger.warning(f" [Early Stopping] Метрика Macro F1 застряла и не росла {patience} эпох. Стоп.")
+            logger.warning(f" [Early Stopping] Метрика Combo Score застряла и не росла {patience} эпох. Стоп.")
             break
 
     logger.info(f"=== Процесс обучения успешно завершен! ===")
-    logger.info(f"Лучший результат на эпохе {best_epoch}: Macro F1 = {best_val_macro_f1:.4f}")
+    logger.info(f"Лучший результат на эпохе {best_epoch}: Combo Score = {best_combo_score:.4f}")
 
 
 if __name__ == "__main__":

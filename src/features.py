@@ -1,3 +1,4 @@
+import os
 import logging
 import numpy as np
 import pandas as pd
@@ -10,13 +11,12 @@ logger = logging.getLogger(__name__)
 class FeatureExtractor:
     """
     Высокоэффективный интрадей Feature Engineering для BTC/ETH 1m.
-    Итоговый набор из 15 изолированных признаков (консенсус ML-моделей).
-    Архитектура полностью динамическая — все окна вынесены в конфигурационный файл.
+    Генерирует мощный, очищенный от коллинеарности набор признаков для GRU.
     """
 
     def __init__(self):
         self.params = FEATURE_PARAMS
-        self.col = self.params['target_column']  # Ожидаем 'Close'
+        self.col = self.params.get('target_column', 'Close')
 
     def _calculate_ema(self, series, period):
         return series.ewm(span=period, adjust=False).mean()
@@ -27,9 +27,7 @@ class FeatureExtractor:
     def extract_features(self, df: pd.DataFrame) -> pd.DataFrame:
         initial_rows = len(df)
 
-        logger.info(
-            "Запуск динамического интрадей Feature Engineering (Базис: 15 признаков)..."
-        )
+        logger.info("Запуск прокачанного интрадей Feature Engineering для QuantiGRU...")
 
         try:
             df_f = pd.DataFrame(index=df.index)
@@ -41,67 +39,67 @@ class FeatureExtractor:
             volume = df['Volume']
 
             # =====================================================
-            # 1. RETURNS & MOMENTUM (5 признаков)
+            # 1. RETURNS & MOMENTUM (Очищено от дублей)
             # =====================================================
             logret_1 = np.log(close / close.shift(1))
             df_f['logret_1'] = logret_1
 
-            # Мульти-горизонты логарифмических доходностей
-            for h in self.params['ret_horizons']:
-                if h != 1:
-                    df_f[f'ret_{h}'] = np.log(close / close.shift(h))
+            # Вместо кучи ret_X оставляем только один среднесрочный импульс (momentum)
+            df_f['momentum_5'] = np.log(close / close.shift(5))
 
             # =====================================================
-            # 2. VOLATILITY & REGIME (4 признака)
+            # 2. VOLATILITY & REGIME (Режимные индикаторы)
             # =====================================================
-            df_f['vol_fast'] = logret_1.rolling(self.params['vol_fast_period']).std()
-            df_f['vol_slow'] = logret_1.rolling(self.params['vol_slow_period']).std()
-
-            # Отношение волатильностей (Режимный индикатор шума)
+            df_f['vol_fast'] = logret_1.rolling(self.params.get('vol_fast_period', 15)).std()
+            df_f['vol_slow'] = logret_1.rolling(self.params.get('vol_slow_period', 60)).std()
             df_f['vol_ratio'] = df_f['vol_fast'] / df_f['vol_slow'].replace(0, 1e-8)
 
-            # Волатильность Паркинсона (Размах внутрисвечевой борьбы)
+            # Волатильность Паркинсона (Оставляем — это отличный признак скрытого зажатия цены)
             parkinson_raw = (np.log(high / low.replace(0, 1e-8)) ** 2) / (4 * np.log(2))
-            df_f['parkinson_vol'] = parkinson_raw.rolling(self.params['parkinson_window']).mean()
+            df_f['parkinson_vol'] = parkinson_raw.rolling(self.params.get('parkinson_window', 15)).mean()
 
             # =====================================================
-            # 3. MEAN REVERSION & POSITION (3 признака)
+            # 3. MEAN REVERSION & STRUCTURE
             # =====================================================
-            # Быстрый и медленный Price Z-Scores (Динамические имена фич)
-            mean_fast = close.rolling(self.params['zscore_fast_period']).mean()
-            std_fast = close.rolling(self.params['zscore_fast_period']).std()
-            df_f['price_zscore_fast'] = (close - mean_fast) / std_fast.replace(0, 1e-8)
+            # Bollinger Position (Идеальный безразмерный осциллятор положения цены)
+            sma_bb = self._calculate_sma(close, self.params.get('bb_period', 20))
+            std_bb = close.rolling(self.params.get('bb_period', 20)).std()
+            upper_bb = sma_bb + self.params.get('bb_std_dev', 2.0) * std_bb
+            lower_bb = sma_bb - self.params.get('bb_std_dev', 2.0) * std_bb
 
-            mean_slow = close.rolling(self.params['zscore_slow_period']).mean()
-            std_slow = close.rolling(self.params['zscore_slow_period']).std()
-            df_f['price_zscore_slow'] = (close - mean_slow) / std_slow.replace(0, 1e-8)
+            df_f['BB_Position'] = (close - lower_bb) / (upper_bb - lower_bb).replace(0, 1e-8)
+            df_f['BB_Position'] = df_f['BB_Position'].clip(-1, 2)
 
-            # Bollinger Position (Считается строго по Close)
-            sma_bb = self._calculate_sma(close, self.params['bb_period'])
-            std_bb = close.rolling(self.params['bb_period']).std()
-            upper_bb = sma_bb + self.params['bb_std_dev'] * std_bb
-            lower_bb = sma_bb - self.params['bb_std_dev'] * std_bb
-
-            bb_pos = (close - lower_bb) / (upper_bb - lower_bb).replace(0, 1e-8)
-            df_f['BB_Position'] = bb_pos.clip(-1, 2)
-
-            # =====================================================
-            # 4. TREND & STRUCTURE (2 признака)
-            # =====================================================
-            # Логарифмический EMA спред от цены
-            ema_fast = self._calculate_ema(close, self.params['ema_fast_period'])
-            ema_slow = self._calculate_ema(close, self.params['ema_slow_period'])
+            # Спред EMA (Показывает силу тренда без привязки к цене в баксах)
+            ema_fast = self._calculate_ema(close, self.params.get('ema_fast_period', 12))
+            ema_slow = self._calculate_ema(close, self.params.get('ema_slow_period', 26))
             df_f['EMA_spread'] = np.log(ema_fast / ema_slow.replace(0, 1e-8))
 
-            # Направление давления внутри свечи (тело свечи)
+            # Относительное тело свечи
             df_f['body_pct'] = (close - open_p) / open_p.replace(0, 1e-8)
 
             # =====================================================
-            # 5. VOLUME DYNAMICS (1 признака)
+            # 4. VOLUME & LIQUIDITY DYNAMICS (Критическое усиление!)
             # =====================================================
-            vol_mean = volume.rolling(self.params['volume_window']).mean()
-            vol_std = volume.rolling(self.params['volume_window']).std()
-            df_f['volume_zscore'] = (volume - vol_mean) / vol_std.replace(0, 1e-8)
+            # Сила объема: Z-score объема на коротком окне
+            vol_mean_f = volume.rolling(15).mean()
+            vol_std_f = volume.rolling(15).std()
+            df_f['volume_zscore_fast'] = (volume - vol_mean_f) / vol_std_f.replace(0, 1e-8)
+
+            # Накопление объема (Аналог OBV, но в виде темпа прироста кумулятивного давления)
+            # Показывает, куда давят крупные сайзы: на покупку или продажу
+            direction = np.where(logret_1 > 0, 1, np.where(logret_1 < 0, -1, 0))
+            directed_volume = volume * direction
+            df_f['vol_pressure_5'] = directed_volume.rolling(5).sum() / vol_mean_f.replace(0, 1e-8)
+
+            # =====================================================
+            # 5. ИНТЕНСИВНОСТЬ РЫНКА (Микроструктура)
+            # =====================================================
+            # Отношение истинного диапазона хода к объему (Эффективность цены)
+            # Помогает GRU отличать пустой ложный пробой от истинного импульса на объемах
+            true_range = high - low
+            df_f['market_efficiency'] = true_range / volume.replace(0, 1e-8)
+            df_f['market_efficiency'] = df_f['market_efficiency'].rolling(5).mean()
 
             # =====================================================
             # CLEANING & DROPPING
@@ -111,7 +109,7 @@ class FeatureExtractor:
 
             logger.info(
                 f"Генерация фич успешно завершена.\n"
-                f" -> Итого чистых признаков в матрице: {df_clean.shape[1]} (Ровно 15 без дубликатов)\n"
+                f" -> Итого чистых признаков в матрице: {df_clean.shape[1]}\n"
                 f" -> Удалено начальных строк разгона: {dropped_rows}"
             )
 

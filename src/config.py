@@ -67,7 +67,8 @@ TRAINING_PARAMS = {
     'patience': 12,            # Early Stopping: ждем максимум 10 эпох застоя Val Loss, прежде чем завершить процесс
     'lr': 3e-4,
     'weight_decay': 1e-4,
-    'num_workers': 0
+    'num_workers': 0,
+    'min_delta': 0.003
 }
 
 # --- НАСТРОЙКИ БЭКТЕСТОВ 1D (Автоматически синхронизированы с DATA_LOAD_PARAMS) ---
