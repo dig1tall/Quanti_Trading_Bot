@@ -13,95 +13,98 @@ from src.model import QuantiGRU
 
 logger = logging.getLogger(__name__)
 
-
 def run_backtest():
-    logger.info("=== Запуск промышленного бэктестинга Quanti Ver 1.1.0 через VectorBT ===")
+    logger.info("=== Запуск промышленного бэктестинга Quanti Ver 2.0.0 (Режим: 1d, ТРИНАРНЫЙ) ===")
 
-    device = torch.device(TRAINING_PARAMS['device'] if torch.cuda.is_available() else 'cpu')
+    device = torch.device(TRAINING_PARAMS.get('device', 'cpu') if torch.cuda.is_available() else 'cpu')
 
-    # 1. Загружаем лоадер (только валидационный датасет)
-    val_loader = get_backtest_loader(
-        sequence_length=MODEL_PARAMS['sequence_length'],
-        batch_size=TRAINING_PARAMS['batch_size']
-    )
+    # 1. Загружаем лоадер
+    val_loader = get_backtest_loader()
 
-    # 2. Загрузка расширенного чекпоинта модели
+    # 2. Загрузка чекпоинта модели
     model_path = os.path.join(PROJECT_ROOT, "models", "best_quanti_model.pth")
     if not os.path.exists(model_path):
-        logger.error(f"Критическая ошибка: файл весов {model_path} не найден! Сначала обучи сеть.")
+        logger.error(f"Критическая ошибка: файл весов {model_path} не найден! Сначала обучи сеть через train.py.")
         return
 
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
-    # Извлекаем сохранённые фичи и проверяем консистентность
     saved_features = checkpoint.get('feature_names', [])
     input_size = len(saved_features) if saved_features else val_loader.dataset.X.shape[1]
 
-    logger.info(f"Загружен чекпоинт лучшей эпохи {checkpoint.get('epoch', 'unknown')}.")
-    logger.info(f"Проверка фич модели: обнаружено {input_size} признаков.")
+    logger.info(f"Успешно загружен чекпоинт лучшей эпохи {checkpoint.get('epoch', 'unknown')} (Macro F1: {checkpoint.get('val_macro_f1', 0):.4f}).")
 
-    # Инициализируем архитектуру и накатываем веса
+    # Инициализируем архитектуру (output_size=3 подтянется из config автоматически)
     model = QuantiGRU(
         input_size=input_size,
         hidden_size=MODEL_PARAMS['hidden_size'],
         num_layers=MODEL_PARAMS['num_layers'],
-        output_size=MODEL_PARAMS['output_size']
+        output_size=MODEL_PARAMS['output_size'],
+        dropout_rate=MODEL_PARAMS['dropout_rate']
     ).to(device)
 
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
-    logger.info("Веса нейросети успешно развёрнуты на устройстве.")
+    logger.info("Веса тринарной нейросети развёрнуты.")
 
     all_raw_probs = []
     all_targets = []
 
-    # 3. ФАЗА ИНФЕРЕНСА: Собираем чистые Softmax-вероятности
-    logger.info("Запуск инференса модели для извлечения Softmax-вероятностей...")
+    # 3. ФАЗА ИНФЕРЕНСА: Собираем вероятности классов (размерность output_size=3)
+    logger.info("Запуск инференса модели на валидационной выборке...")
     with torch.no_grad():
         for X_batch, y_batch in val_loader:
             X_batch = X_batch.to(device)
             logits = model(X_batch)
 
-            probs = torch.softmax(logits, dim=1)
+            TEMPERATURE = 0.8  # Чем меньше, тем увереннее (полярнее) будут предсказания
+            probs = torch.softmax(logits / TEMPERATURE, dim=1)
             all_raw_probs.append(probs.cpu().numpy())
             all_targets.extend(y_batch.numpy().flatten())
 
-    raw_probs_matrix = np.vstack(all_raw_probs)  # Матрица размерностью [N_windows, 3]
+    raw_probs_matrix = np.vstack(all_raw_probs)  # [N_windows, 3]
     targets = np.array(all_targets)
 
-    # 4. РЕАЛИЗАЦИЯ WEIGHTED TIME-DECAY VOTING И CONFIDENCE FILTER
-    logger.info("Применение алгоритма сглаживания Weighted Time-Decay и Confidence Filter...")
+    # 4. ИНТЕРПРЕТАЦИЯ СИГНАЛОВ (КЛАССИЧЕСКИЙ АБСОЛЮТНЫЙ ПОРОГ + ГИСТЕРЕЗИС)
+    logger.info("Преобразование выходов сети в торговые сигналы (Фильтрация по абсолютному порогу)...")
 
-    voting_window = BACKTEST_PARAMS.get('voting_window', 3)       # Окно накопления истории (минуты)
-    decay_lambda = BACKTEST_PARAMS.get('decay_lambda', 0.2)        # Скорость затухания старых прогнозов
-    confidence_threshold = BACKTEST_PARAMS.get('threshold', 0.46)  # Порог уверенности
+    # Достаем наш классический порог (например, 0.55). Если забыл прописать, дефолт 0.50
+    threshold_long = BACKTEST_PARAMS.get('threshold_long', 0.55)
+    threshold_short = BACKTEST_PARAMS.get('threshold_short', 0.45)
 
-    # Рассчитываем веса затухания для окна истории в явном виде
-    if voting_window > 1:
-        decay_weights = np.exp(-decay_lambda * np.arange(voting_window)[::-1])
-        decay_weights /= np.sum(decay_weights) # Нормализуем в сумму = 1
-    else:
-        decay_weights = np.array([1.0])
+    signals = np.zeros(len(raw_probs_matrix), dtype=np.float32)
+    current_signal = 0.0 # Начинаем вне рынка (Flat)
 
-    final_classes = np.ones(len(raw_probs_matrix), dtype=int) # По дефолту всё забиваем во Flat (1)
-
-    # Двигаемся скользящим окном по вероятностям для агрегации истории
     for idx in range(len(raw_probs_matrix)):
-        if idx < voting_window or voting_window <= 1:
-            # Если истории ещё недостаточно или окно отключено, берём текущую точку «как есть»
-            prob_vector = raw_probs_matrix[idx]
-        else:
-            # Вырезаем окно прошлых вероятностей [voting_window, 3]
-            window_probs = raw_probs_matrix[idx - voting_window + 1 : idx + 1]
-            # Взвешенное суммирование по оси времени
-            prob_vector = np.dot(decay_weights, window_probs)
-
-        # Confidence Filter: проверяем максимальную силу сигнала
+        prob_vector = raw_probs_matrix[idx]
         max_prob_class = np.argmax(prob_vector)
-        if prob_vector[max_prob_class] >= confidence_threshold:
-            final_classes[idx] = max_prob_class
+        max_prob = prob_vector[max_prob_class]
+
+        # Определяем нужный порог динамически
+        current_threshold = threshold_long if max_prob_class == 2 else threshold_short
+
+        # Базовое желание модели на основе максимальной вероятности
+        if max_prob_class == 2:
+            target_signal = 1.0  # Хочет в Long
+        elif max_prob_class == 0:
+            target_signal = -1.0 # Хочет в Short
         else:
-            final_classes[idx] = 1 # Откат во Flat при неуверенности
+            target_signal = 0.0  # Хочет во Flat
+
+        # --- ЛОГИКА АБСОЛЮТНОГО ПОРОГА С УДЕРЖАНИЕМ ТРЕНДА ---
+        if current_signal == 0.0:
+            if max_prob >= current_threshold:
+                current_signal = target_signal
+        else:
+            # Логика выхода (смена позиции)
+            if target_signal != current_signal:
+                # Для выхода требуем чуть большую уверенность, чтобы не закрываться раньше времени
+                if max_prob >= current_threshold:
+                    current_signal = target_signal
+
+        signals[idx] = current_signal
+
+    logger.info(f"Фильтрация завершена. Сигналы стабилизированы.")
 
     # 5. ХРОНОЛОГИЧЕСКАЯ СИНХРОНИЗАЦИЯ ЦЕН
     val_path = config.VAL_FEATURES_PATH
@@ -114,10 +117,9 @@ def run_backtest():
 
     val_dates = df_features_file.index[-len(targets):]
 
-    # Подгружаем ОРИГИНАЛЬНЫЕ сырые цены
-    raw_data_path = os.path.join(config.DATA_DIR, "BTC-USDT_1m.parquet")
+    raw_data_path = os.path.join(config.DATA_DIR, "BTC-USDT_1d.parquet")
     if not os.path.exists(raw_data_path):
-        raise FileNotFoundError(f"Критическая ошибка: сырой файл цен не найден по пути {raw_data_path}!")
+        raise FileNotFoundError(f"Критическая ошибка: сырой файл дневных цен не найден по пути {raw_data_path}!")
 
     df_raw = pd.read_parquet(raw_data_path)
 
@@ -129,98 +131,61 @@ def run_backtest():
     try:
         val_close = df_raw.loc[val_dates, 'Close'].copy()
     except KeyError:
-        logger.warning("Прямой матчинг индексов не удался. Применяем фолбэк по хронологическому срезу с конца.")
+        logger.warning("Прямой матчинг индексов не удался. Применяем хронологический срез.")
         val_close = df_raw['Close'].iloc[-len(targets):].copy()
 
     if val_close.isna().any():
-        logger.warning(f"В синхронизированных ценах найдено {val_close.isna().sum()} NaN. Исправляем через ffill.")
         val_close = val_close.ffill().bfill()
 
-    logger.info(f"Цены успешно синхронизированы из сырого кэша. Период: с {val_close.index[0]} по {val_close.index[-1]}")
-    logger.info(f"Диапазон цен BTC на тесте: {val_close.min():.2f}$ - {val_close.max():.2f}$")
-
-    # 6. ТРАНСФОРМАЦИЯ В СИГНАЛЫ ТОРГОВЛИ
-    signals = np.zeros_like(final_classes, dtype=np.float32)
-    signals[final_classes == 2] = 1.0  # Long
-    signals[final_classes == 0] = -1.0 # Short
+    logger.info(f"Цены успешно синхронизированы. Окон на тесте: {len(val_close)} | с {val_close.index[0]} по {val_close.index[-1]}")
 
     signals_series = pd.Series(signals, name='Quanti_Signals', index=val_close.index)
 
-    # 7. ДВИЖОК СИМУЛЯЦИИ ПОРТФЕЛЯ (ИСПРАВЛЕНО: Фильтр удержания min_hold_bars)
-    logger.info("Конструирование масок торговых ордеров с фильтром минимального удержания...")
-    raw_entries = (signals_series == 1).to_numpy()
-    raw_exits = (signals_series == -1).to_numpy()
+    # 6. КОНСТРУИРОВАНИЕ МАСОК ОРДЕРОВ ДЛЯ VECTORBT
+    entries = (signals_series == 1.0)
+    # Выходим из лонга, если модель явно говорит выйти в кэш (0) или перевернуться в шорт (-1)
+    exits = (signals_series == 0.0) | (signals_series == -1.0)
 
-    time_stop_val = BACKTEST_PARAMS.get('time_stop', 120)
-    min_hold_bars = BACKTEST_PARAMS.get('min_hold_bars', 20)  # Берем из лимитов удержания
+    short_entries = (signals_series == -1.0)
+    # Выходим из шорта, если модель уходит в кэш (0) или переворачивается в лонг (1)
+    short_exits = (signals_series == 0.0) | (signals_series == 1.0)
 
-    entries = np.zeros_like(raw_entries, dtype=bool)
-    exits = np.zeros_like(raw_exits, dtype=bool)
-    short_entries = np.zeros_like(raw_entries, dtype=bool)
-    short_exits = np.zeros_like(raw_exits, dtype=bool)
-
-    in_long = False
-    in_short = False
-    bars_since_entry = 0
-
-    for i in range(len(signals_series)):
-        # Обработка активного лонга
-        if in_long:
-            bars_since_entry += 1
-            if (bars_since_entry >= min_hold_bars and raw_exits[i]) or bars_since_entry >= time_stop_val:
-                exits[i] = True
-                in_long = False
-                bars_since_entry = 0
-        # Обработка активного шорта
-        elif in_short:
-            bars_since_entry += 1
-            if (bars_since_entry >= min_hold_bars and raw_entries[i]) or bars_since_entry >= time_stop_val:
-                short_exits[i] = True
-                in_short = False
-                bars_since_entry = 0
-        # Вход в позицию (только если мы свободны от сделок)
-        else:
-            if raw_entries[i]:
-                entries[i] = True
-                in_long = True
-                bars_since_entry = 0
-            elif raw_exits[i]:
-                short_entries[i] = True
-                in_short = True
-                bars_since_entry = 0
-
-    fee_rate = BACKTEST_PARAMS.get('fee_rate', 0.0006)
-    slippage_rate = BACKTEST_PARAMS.get('slippage', 0.0002) # Добавили извлечение проскальзывания
-    init_cash = BACKTEST_PARAMS.get('init_cash', 10000.0)
-    freq = BACKTEST_PARAMS.get('freq', '1m')
-
-    sl_val = BACKTEST_PARAMS.get('stop_loss', None)
-    tp_val = BACKTEST_PARAMS.get('take_profit', None)
-
-    # Инициализация VectorBT портфеля с учетом комиссий И проскальзывания
+    # 7. ДВИЖОК СИМУЛЯЦИИ ПОРТФЕЛЯ
     portfolio = vbt.Portfolio.from_signals(
         close=val_close,
-        entries=pd.Series(entries, index=val_close.index).astype(bool),
-        exits=pd.Series(exits, index=val_close.index).astype(bool),
-        short_entries=pd.Series(short_entries, index=val_close.index).astype(bool),
-        short_exits=pd.Series(short_exits, index=val_close.index).astype(bool),
-        init_cash=init_cash,
-        fees=fee_rate,
-        slippage=slippage_rate,  # ДОБАВЛЕНО УЧИТЫВАНИЕ ПРОСКАЛЬЗЫВАНИЯ
-        freq=freq,
-        sl_stop=sl_val,
-        tp_stop=tp_val
+        high=df_raw.loc[val_dates, 'High'],
+        low=df_raw.loc[val_dates, 'Low'],
+        entries=entries,
+        exits=exits,
+        short_entries=short_entries,
+        short_exits=short_exits,
+        init_cash=BACKTEST_PARAMS['init_cash'],
+        fees=BACKTEST_PARAMS['fee_rate'],
+        slippage=BACKTEST_PARAMS['slippage'],
+        freq=BACKTEST_PARAMS['freq'],
+
+        # === МЕНЕДЖМЕНТ РИСКОВ ===
+        sl_stop=BACKTEST_PARAMS.get('stop_loss', None),
+        tp_stop=BACKTEST_PARAMS.get('take_profit', None),
+        upon_stop_exit=1,
+        accumulate=False
     )
 
     # 8. РАСЧЕТ И ВЫВОД РЕЗУЛЬТАТОВ КВАНТ-ТЕСТА
-    accuracy = np.sum(final_classes == targets) / len(targets)
+    # Метрика Accuracy считается по всем направлениям (0, 1, 2)
+    pred_classes = np.zeros(len(signals))
+    pred_classes[signals == 1.0] = 2
+    pred_classes[signals == 0.0] = 1
+    pred_classes[signals == -1.0] = 0
 
-    logger.info("=== ИТОГОВЫЕ МЕТРИКИ СИМУЛЯЦИИ VECTORBT ===")
-    logger.info(f"Обработано свечей: {len(targets)}")
-    logger.info(f"Точность сглаженного инференса (Accuracy): {accuracy * 100:.2f}%")
-    logger.info(f"Количество сгенерированных сигналов Long: {np.sum(final_classes == 2)}")
-    logger.info(f"Количество сгенерированных сигналов Short: {np.sum(final_classes == 0)}")
-    logger.info(f"Количество отфильтрованных Flat: {np.sum(final_classes == 1)}")
+    total_accuracy = np.mean(pred_classes == targets) * 100
+
+    logger.info("=== ИТОГОВЫЕ МЕТРИКИ СИМУЛЯЦИИ VECTORBT (1D ТРИНАРНЫЙ МАКРО) ===")
+    logger.info(f"Всего окон в валидации: {len(targets)}")
+    logger.info(f"Общая точность модели (Total Accuracy): {total_accuracy:.2f}%")
+    logger.info(f"Количество дней в Long: {np.sum(signals == 1.0)}")
+    logger.info(f"Количество дней в Short: {np.sum(signals == -1.0)}")
+    logger.info(f"Количество дней удержания кэша (Flat): {np.sum(signals == 0.0)}")
 
     logger.info(f"\n{portfolio.stats().to_string()}")
 
@@ -230,13 +195,12 @@ def run_backtest():
         os.makedirs(reports_dir, exist_ok=True)
 
         current_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        report_filename = f"backtest_{current_time}.html"
+        report_filename = f"backtest_3cl_1d_{current_time}.html"
         report_path = os.path.join(reports_dir, report_filename)
 
         fig = portfolio.plot()
         fig.write_html(report_path)
-        logger.info(f"Интерактивный дашборд бэктеста успешно сохранён в: reports/{report_filename}")
-
+        logger.info(f"Интерактивный дашборд бэктеста сохранён в: reports/{report_filename}")
 
 if __name__ == "__main__":
     from src.config import setup_logging

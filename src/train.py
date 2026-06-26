@@ -4,6 +4,7 @@ import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from sklearn.metrics import f1_score, confusion_matrix
 import numpy as np
 
@@ -14,37 +15,69 @@ from src.model import QuantiGRU
 
 logger = logging.getLogger(__name__)
 
+class QuantiTradingLoss(nn.Module):
+    def __init__(self, class_weights, alpha_ordinal=1.5, gamma=2.0):
+        super(QuantiTradingLoss, self).__init__()
+        self.class_weights = class_weights
+        self.gamma = gamma
+        self.alpha_ordinal = alpha_ordinal
+
+        # Матрица жестких штрафов за неверное направление (Размерность 3х3)
+        # Строки - факт, столбцы - прогноз
+        # За ошибку Short <-> Long караем со всей строгостью
+        self.cost_matrix = torch.tensor([
+            [0.0, 1.0, 2.0],  # Факт 0 (Short): Ошибка в Long (2) весит 2.0
+            [1.0, 0.0, 1.0],  # Факт 1 (Flat): Стандарт
+            [2.0, 1.0, 0.0]   # Факт 2 (Long): Ошибка в Short (0) весит 2.0
+        ], dtype=torch.float32)
+
+    def forward(self, logits, targets):
+        # 1. СТАНДАРТНЫЙ МУЛЬТИКЛАССОВЫЙ FOCAL LOSS
+        ce_loss = F.cross_entropy(logits, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+
+        # Используем веса классов
+        batch_weights = self.class_weights[targets]
+        focal_loss = batch_weights * ((1 - pt) ** self.gamma) * ce_loss
+        focal_loss = focal_loss.mean()
+
+        # 2. НАПРАВЛЕННЫЙ ТОРГОВЫЙ ШТРАФ ПО МАТРИЦЕ СТОИМОСТИ
+        probs = F.softmax(logits, dim=1) # [Batch, 3]
+
+        # Вытаскиваем нужные строки из cost_matrix под текущие таргеты батча
+        # P.S. Матрица должна быть на том же девайсе, что и логиты
+        batch_cost = self.cost_matrix.to(logits.device)[targets] # [Batch, 3]
+
+        # Перемножаем вероятности предсказаний на штрафные коэффициенты
+        # Если факт Short, а probs[2] (Long) высокая -> penalty улетит в космос
+        directional_penalty = torch.sum(probs * batch_cost, dim=1).mean()
+
+        # Общий лосс
+        return focal_loss + self.alpha_ordinal * directional_penalty
+
 def train_model():
-    logger.info("=== Запуск промышленного процесса обучения QuantiGRU ===")
+    logger.info("=== Запуск стабилизированного процесса обучения QuantiGRU (Focal + Ordinal) ===")
 
-    # 2. Определение устройства вычислений
-    device = torch.device(TRAINING_PARAMS['device'] if torch.cuda.is_available() else 'cpu')
-    logger.info(f"Используемое устройство: {device}")
+    device = torch.device(TRAINING_PARAMS.get('device', 'cpu') if torch.cuda.is_available() else 'cpu')
+    train_loader, val_loader = get_separated_data_loaders()
 
-    # 3. Загрузка потоков данных
-    train_loader, val_loader = get_separated_data_loaders(
-        sequence_length=MODEL_PARAMS['sequence_length'],
-        batch_size=TRAINING_PARAMS['batch_size']
-    )
+    # Измени этот блок в train_model():
+    logger.info("--- Баланс классов и расчет весов ---")
+    train_targets = train_loader.dataset.targets.numpy()
+    unique, counts = np.unique(train_targets, return_counts=True)
+    total_samples = len(train_targets)
 
-    # Выводим распределение классов
-    logger.info("--- Баланс классов в сырых датасетах ---")
-    for name, loader in [("Train", train_loader), ("Validation", val_loader)]:
-        if hasattr(loader.dataset, 'active_targets'):
-            targets = loader.dataset.active_targets
-        else:
-            seq_len = MODEL_PARAMS['sequence_length']
-            targets = loader.dataset.targets[seq_len : seq_len + len(loader.dataset)]
+    # ВМЕСТО АВТОМАТИКИ: Намеренно занижаем вес флэта, чтобы модель хотела искать Long/Short
+    # Индексы: [Short, Flat, Long]
+    class_weights = np.array([1.0, 0.8, 1.0], dtype=np.float32)
+    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
 
-        unique, counts = np.unique(targets, return_counts=True)
-        total = len(targets)
-        dist_str = ", ".join([f"Класс {k}: {v/total*100:.1f}%" for k, v in zip(unique, counts)])
-        logger.info(f" -> {name}: {dist_str}")
+    for k, v, w in zip(unique, counts, class_weights):
+        logger.info(f" ->  Класс {k}: {v} шт ({v/total_samples*100:.1f}%) | Принудительный Вес: {w:.4f}")
 
     feature_names = train_loader.dataset.feature_names
     input_size = len(feature_names)
 
-    # 4. Инициализация модели
     model = QuantiGRU(
         input_size=input_size,
         hidden_size=MODEL_PARAMS['hidden_size'],
@@ -53,42 +86,25 @@ def train_model():
         dropout_rate=MODEL_PARAMS['dropout_rate']
     ).to(device)
 
-    # 5. Оптимизаторы и Лосс
-    # ВРЕМЕННО: принудительно зануляем сглаживание для тестирования чистых вероятностей,
-    # игнорируя 0.05 из конфига. Когда таргет стабилизируется, вернешь обратно MODEL_PARAMS.get('label_smoothing', 0.0)
-    smoothing = 0.0 #TRAINING_PARAMS['label_smoothing']
-    criterion = nn.CrossEntropyLoss(label_smoothing=smoothing)
+    # Инициализируем наш кастомный комбинированный лосс
+    criterion = QuantiTradingLoss(class_weights=class_weights_tensor, alpha_ordinal=0.6, gamma=2.0)
 
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=TRAINING_PARAMS['lr'],
-        weight_decay=TRAINING_PARAMS['weight_decay']
-    )
-
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=3
-    )
+    optimizer = optim.AdamW(model.parameters(), lr=TRAINING_PARAMS['lr'], weight_decay=TRAINING_PARAMS['weight_decay'])
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
 
     use_amp = device.type == 'cuda'
     amp_scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
-    epochs = TRAINING_PARAMS['epochs']
-
-    # КРИТЕРИЙ УСПЕХА: Ищем максимум по Combo Score
     best_combo_score = float('-inf')
     patience = TRAINING_PARAMS['patience']
     patience_counter = 0
     best_epoch = 0
     delta = TRAINING_PARAMS['min_delta']
 
-    logger.info(f"Параметры: Эпох={epochs} | Оптимизатор=AdamW (LR={TRAINING_PARAMS['lr']}) | Критерий Early Stopping = Combo Score (delta={delta})")
-
-    # 6. Главный цикл обучения
-    for epoch in range(1, epochs + 1):
-        # --- ФАЗА ТРЕНИРОВКИ ---
+    for epoch in range(1, TRAINING_PARAMS['epochs'] + 1):
+        # --- TRAIN LOOP ---
         model.train()
         train_loss = 0.0
-
         for X_batch, y_batch in train_loader:
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             y_batch = y_batch.squeeze().long()
@@ -99,10 +115,8 @@ def train_model():
                     predictions = model(X_batch)
                     loss = criterion(predictions, y_batch)
                 amp_scaler.scale(loss).backward()
-
                 amp_scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
                 amp_scaler.step(optimizer)
                 amp_scaler.update()
             else:
@@ -113,15 +127,12 @@ def train_model():
                 optimizer.step()
 
             train_loss += loss.item() * X_batch.size(0)
-
         train_loss /= len(train_loader.dataset)
 
-        # --- ФАЗА ВАЛИДАЦИИ ---
+        # --- VALIDATION LOOP ---
         model.eval()
         val_loss = 0.0
-        all_preds = []
-        all_targets = []
-        all_confidences = []
+        all_preds, all_targets, all_confidences = [], [], []
 
         with torch.no_grad():
             for X_batch, y_batch in val_loader:
@@ -146,43 +157,31 @@ def train_model():
                 all_confidences.extend(batch_confidences.cpu().numpy())
 
         val_loss /= len(val_loader.dataset)
-
-        # Считаем метрики качества сигналов
         val_accuracy = (np.array(all_preds) == np.array(all_targets)).mean() * 100
-        val_macro_f1 = f1_score(all_targets, all_preds, average='macro')
-        val_trading_f1 = f1_score(all_targets, all_preds, labels=[0, 2], average='macro')
+        val_macro_f1 = f1_score(all_targets, all_preds, average='macro', labels=[0, 1, 2], zero_division=0)
 
-        # РАСЧЕТ КОМБИНИРОВАННОГО СКОРА ДЛЯ КВАНТ-ОТБОРА
-        current_score = 0.7 * val_trading_f1 + 0.3 * val_macro_f1
-        mean_confidence = np.mean(all_confidences)
-
-        current_lr = optimizer.param_groups[0]['lr']
+        current_score = val_macro_f1
         scheduler.step(current_score)
 
         logger.info(
-            f"Эпоха [{epoch:02d}/{epochs:02d}] | LR: {current_lr:.6f} | "
+            f"Эпоха [{epoch:02d}/{TRAINING_PARAMS['epochs']:02d}] | "
             f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
-            f"Macro F1: {val_macro_f1:.4f} | Trading F1: {val_trading_f1:.4f} | "
-            f"**Combo Score: {current_score:.4f}** | Conf: {mean_confidence:.3f}"
+            f"Accuracy: {val_accuracy:.2f}% | **Macro F1: {current_score:.4f}**"
         )
 
-        # Честная проверка улучшения с учетом жесткого шага delta
         if current_score > (best_combo_score + delta):
-            # Считаем чистый шаг прогресса относительно старого рекорда (для первой эпохи это текущий скор)
-            improvement = current_score - (best_combo_score if best_combo_score != float('-inf') else 0.0)
-
             best_combo_score = current_score
             best_epoch = epoch
             patience_counter = 0
 
-            cm = confusion_matrix(all_targets, all_preds)
+            cm = confusion_matrix(all_targets, all_preds, labels=[0, 1, 2])
             cm_text = (
-                f"\n--- Матрица ошибок для Лучшей Эпохи {epoch} (Combo Score: {current_score:.4f}) ---\n"
-                f"            Предсказано\n"
-                f"            Short  Flat   Long\n"
-                f"Факт Short:  {cm[0][0]:<5}  {cm[0][1]:<5}  {cm[0][2]:<5}\n"
-                f"Факт Flat :  {cm[1][0]:<5}  {cm[1][1]:<5}  {cm[1][2]:<5}\n"
-                f"Факт Long :  {cm[2][0]:<5}  {cm[2][1]:<5}  {cm[2][2]:<5}\n"
+                f"\n--- Матрица ошибок 3x3 для Лучшей Эпохи {epoch} ---\n"
+                f"             Предсказано\n"
+                f"             Short(0)   Flat(1)    Long(2)\n"
+                f"Факт Short:  {cm[0][0]:<10} {cm[0][1]:<10} {cm[0][2]:<10}\n"
+                f"Факт Flat :  {cm[1][0]:<10} {cm[1][1]:<10} {cm[1][2]:<10}\n"
+                f"Факт Long :  {cm[2][0]:<10} {cm[2][1]:<10} {cm[2][2]:<10}\n"
                 f"-------------------------------------------------------"
             )
             logger.info(cm_text)
@@ -190,32 +189,18 @@ def train_model():
             checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': val_loss,
-                'val_macro_f1': val_macro_f1,
-                'val_trading_f1': val_trading_f1,
-                'combo_score': current_score,
                 'feature_names': feature_names,
-                'lr': current_lr
+                'val_macro_f1': val_macro_f1
             }
-
-            models_dir = os.path.join(PROJECT_ROOT, "models")
-            os.makedirs(models_dir, exist_ok=True)
-            model_path = os.path.join(models_dir, "best_quanti_model.pth")
-            torch.save(checkpoint, model_path)
-            logger.info(f" -> [Запись Чекпоинта] Подтверждено улучшение на +{improvement:.4f}. Модель сохранена.")
+            torch.save(checkpoint, os.path.join(PROJECT_ROOT, "models", "best_quanti_model.pth"))
         else:
             patience_counter += 1
-            if current_score > best_combo_score:
-                logger.info(f" -> Скор {current_score:.4f} выше лучшего ({best_combo_score:.4f}), но шаг прироста меньше delta ({delta}). Игнорируем.")
 
         if patience_counter >= patience:
-            logger.warning(f" [Early Stopping] Метрика Combo Score застряла и не росла {patience} эпох. Стоп.")
+            logger.warning(f" Early Stopping по макро F1.")
             break
 
-    logger.info(f"=== Процесс обучения успешно завершен! ===")
-    logger.info(f"Лучший результат на эпохе {best_epoch}: Combo Score = {best_combo_score:.4f}")
-
+    logger.info(f"Процесс завершен. Лучшая epoch {best_epoch} с Macro F1 = {best_combo_score:.4f}")
 
 if __name__ == "__main__":
     from src.config import setup_logging

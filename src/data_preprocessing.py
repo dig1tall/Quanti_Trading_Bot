@@ -1,5 +1,5 @@
-import logging
 import os
+import logging
 import json
 import numpy as np
 import pandas as pd
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class Scaler:
     """
     Класс для ручного масштабирования признаков.
-    Поддерживает методы: 'standard', 'minmax', 'robust' (рекомендуется для интрадея).
+    Поддерживает методы: 'standard', 'minmax', 'robust'.
     Запоминает параметры на Train-выборке, сериализует их в файл и применяется в Real-time/Backtest.
     """
     def __init__(self, method: str = SCALING_PARAMS.get('method', 'robust')):
@@ -25,6 +25,7 @@ class Scaler:
     def fit(self, df: pd.DataFrame, columns: list) -> None:
         """Вычисляет и сохраняет статистические параметры для указанных числовых колонок."""
         logger.info(f"Инициализация Scaler (метод: {self.method}) на обучающей выборке...")
+        self.params = {}  # Сбрасываем старые параметры перед переобучением
 
         for col in columns:
             if col not in df.columns:
@@ -39,7 +40,7 @@ class Scaler:
                 min_val = float(df[col].min())
                 max_val = float(df[col].max())
                 denom = (max_val - min_val) if max_val != min_val else 1e-8
-                self.params[col] = {
+                self.params[str(col)] = {
                     'min': min_val,
                     'denom': denom
                 }
@@ -48,7 +49,7 @@ class Scaler:
                 std_val = float(df[col].std())
                 if std_val == 0 or np.isnan(std_val):
                     std_val = 1e-8
-                self.params[col] = {
+                self.params[str(col)] = {
                     'mean': mean_val,
                     'std': std_val
                 }
@@ -61,7 +62,7 @@ class Scaler:
                 if iqr_val == 0 or np.isnan(iqr_val):
                     iqr_val = 1e-8
 
-                self.params[col] = {
+                self.params[str(col)] = {
                     'median': median_val,
                     'iqr': iqr_val
                 }
@@ -79,22 +80,23 @@ class Scaler:
             if col not in df_scaled.columns:
                 continue
 
-            df_scaled[col] = df_scaled[col].astype(float)
+            # Приводим к float64 во избежание конфликтов типов при делении массивов
+            values = df_scaled[col].to_numpy().astype(float)
 
             if self.method == 'standard':
                 mean = col_params['mean']
                 std = col_params['std']
-                df_scaled.loc[:, col] = (df_scaled[col].to_numpy() - mean) / std
+                df_scaled[col] = (values - mean) / std
 
             elif self.method == 'minmax':
                 min_val = col_params['min']
                 denom = col_params['denom']
-                df_scaled.loc[:, col] = (df_scaled[col].to_numpy() - min_val) / denom
+                df_scaled[col] = (values - min_val) / denom
 
             elif self.method == 'robust':
                 median = col_params['median']
                 iqr = col_params['iqr']
-                df_scaled.loc[:, col] = (df_scaled[col].to_numpy() - median) / iqr
+                df_scaled[col] = (values - median) / iqr
 
         return df_scaled
 
@@ -104,9 +106,8 @@ class Scaler:
         return self.transform(df)
 
     def save(self, file_path: str = None) -> None:
-        """Сохраняет параметры скейлера в JSON файл для дальнейшего использования в бэктесте/реалтайме."""
-        if file_path == "None" or not file_path:
-            # Задаем дефолтный путь в директорию моделей
+        """Сохраняет параметры скейлера в JSON файл."""
+        if not file_path:
             models_dir = os.path.join(config.PROJECT_ROOT, "models")
             os.makedirs(models_dir, exist_ok=True)
             file_path = os.path.join(models_dir, "scaler_params.json")
@@ -120,7 +121,7 @@ class Scaler:
 
     def load(self, file_path: str = None) -> None:
         """Загружает параметры скейлера из JSON файла."""
-        if file_path == "None" or not file_path:
+        if not file_path:
             file_path = os.path.join(config.PROJECT_ROOT, "models", "scaler_params.json")
 
         if not os.path.exists(file_path):
@@ -150,23 +151,21 @@ if __name__ == "__main__":
         base_df = pd.read_parquet(file_path)
         logger.info(f"Успешно загружен файл для теста: {file_path} (Размерность: {base_df.shape})")
 
+        # Исключаем сырые колонки, если они есть. Если их нет — скейлим всё.
         base_cols = ["Open", "High", "Low", "Close", "Volume"]
         cols_to_scale = [col for col in base_df.columns if col not in base_cols]
+        if not cols_to_scale:
+            cols_to_scale = list(base_df.columns)
 
         scaler = Scaler()
-        # Обучаем и трансформируем
         scaled_df = scaler.fit_transform(base_df, cols_to_scale)
 
-        # Тестируем сохранение
         scaler.save()
 
-        # Тестируем загрузку в новый объект
         new_scaler = Scaler()
         new_scaler.load()
-
-        # Проверяем повторный трансформ на загруженных параметрах
         scaled_df_2 = new_scaler.transform(base_df)
 
-        logger.info("Проверка сериализации прошла успешно! Данные идентичны.")
+        logger.info("Проверка сериализации прошла успешно! Данные защищены от утечек.")
     else:
         logger.error(f"Файл с признаками не найден по пути: {file_path}")

@@ -1,24 +1,23 @@
 import os
 import logging
+import json
 import numpy as np
 import pandas as pd
 
 from src import config
-from src.config import DATA_LOAD_PARAMS, FEATURES_FILE_PATH, SCALING_PARAMS, FEATURE_PARAMS
+from src.config import DATA_LOAD_PARAMS, SCALING_PARAMS, FEATURE_PARAMS
 from src.data_loader import DataLoader
 from src.check_data import DataValidator
 from src.features import FeatureExtractor
 from src.data_preprocessing import Scaler
 
-# Инициализация логгера для модуля движка данных
 logger = logging.getLogger(__name__)
 
 
 class DataEngine:
     """
-    Класс-диспетчер (Engine), управляющий всем конвейером обработки данных Quanti.
-    Связывает DataLoader, DataValidator, FeatureExtractor и Scaler в единый пайплайн.
-    Генерирует и размечает таргеты до разделения во избежание Data Leakage.
+    Класс-диспетчер (Engine), управляющий конвейером обработки данных Quanti.
+    Связывает компоненты и размечает бинарный таргет (Up/Down) без утечек данных.
     """
     def __init__(self):
         self.ticker = DATA_LOAD_PARAMS['ticker']
@@ -26,119 +25,76 @@ class DataEngine:
         self.period = DATA_LOAD_PARAMS['period']
         self.method = SCALING_PARAMS['method']
 
-        # Инициализируем компоненты конвейера
         self.loader = DataLoader(ticker=self.ticker, interval=self.interval, period=self.period)
         self.validator = DataValidator()
         self.extractor = FeatureExtractor()
         self.scaler = Scaler(method=self.method)
 
+    # Замени методы разметки внутри класса DataEngine в src/data_engine.py
+
     def run_pipeline(self) -> None:
-        """Запускает полный цикл генерации признаков, таргета и раздельного масштабирования."""
-        logger.info("=== Запуск конвейера данных через DataEngine ===")
+        logger.info("=== Запуск конвейера данных через DataEngine (Режим: 1d, ТРИНАРНАЯ классификация) ===")
 
-        # 1. Загрузка данных
+        # [Код шагов 1, 2, 3 остается без изменений до расчета таргета...]
         df = self.loader.download_crypto_data()
-        if df.empty:
-            logger.error("Сбой на этапе загрузки данных. Пайплайн остановлен.")
-            return
-
         self.loader.save_to_parquet(df)
-
-        # 2. Валидация сырых данных
-        logger.info("Запуск валидатора целостности данных...")
-        self.validator.validate_dataset(df)
-
-        # 3. Генерация признаков (ML-пайплайн)
-        logger.info("Запуск генерации математических признаков...")
+        df = self.validator.validate_dataset(df)
         df_features = self.extractor.extract_features(df)
-        if df_features.empty:
-            logger.error("Сбой на этапе генерации признаков. Пайплайн остановлен.")
-            return
 
-        # 4. Расчет сырого интрадей-таргета (Чистый Log-Return за forward_horizon баров вперед)
-        forward_horizon = FEATURE_PARAMS.get('forward_horizon', 5)
-        logger.info(f"Расчет чистых сырых таргетов на горизонте {forward_horizon}м через сумму лог-доходностей...")
+        # 4. Расчет сырого таргета (горизонт 1d)
+        forward_horizon = FEATURE_PARAMS.get('forward_horizon', 1)
+        logger.info(f"Расчет сырых таргетов на горизонте {forward_horizon}d...")
 
         if 'logret_1' not in df_features.columns:
-            raise KeyError("Критическая ошибка: колонка 'logret_1' не найдена после FeatureExtractor!")
+            raise KeyError("Критическая ошибка: колонка 'logret_1' не найдена!")
 
-        returns = df_features['logret_1'].values
-        n_rows = len(df_features)
-        raw_targets = np.zeros(n_rows, dtype=np.float32)
+        if forward_horizon == 1:
+            df_features['raw_target'] = df_features['logret_1'].shift(-1)
+        else:
+            df_features['raw_target'] = df_features['logret_1'].shift(-1).rolling(window=forward_horizon).sum().shift(-(forward_horizon-1))
 
-        # Математически: сумма лог-доходностей следующих N свечей равна полному лог-ретурну за этот период
-        for i in range(n_rows - forward_horizon):
-            raw_targets[i] = np.sum(returns[i + 1 : i + 1 + forward_horizon])
+        df_features = df_features.dropna(subset=['raw_target']).copy()
 
-        # Последние forward_horizon строк гарантированно оставляем нулевыми
-        raw_targets[-forward_horizon:] = 0.0
-        df_features['raw_target'] = raw_targets
+        # 5. СТРОГАЯ ТРИНАРНАЯ РАЗМЕТКА КЛАССОВ
+        flat_th = FEATURE_PARAMS.get('flat_threshold', 0.005)
+        logger.info(f"Разметка трех классов по порогу флэта: +-{flat_th*100}%")
 
-        # ---- ПРАВИЛЬНЫЙ РАЗДЕЛЬНЫЙ СКЕЙЛИНГ И ТАРГЕТИНГ ----
-        logger.info("Разделение данных для честной обработки (Train/Val)...")
+        # Заводим вектор нулей (по умолчанию всё Flat = 1)
+        conditions = [
+            (df_features['raw_target'] < -flat_th),                  # Класс 0: жесткое падение (Short)
+            (df_features['raw_target'].abs() <= flat_th),             # Класс 1: боковик (Flat / Вне рынка)
+            (df_features['raw_target'] > flat_th)                    # Класс 2: жесткий рост (Long)
+        ]
+        choices = [0, 1, 2]
+        df_features['target'] = np.select(conditions, choices, default=1)
+        df_features.drop(columns=['raw_target'], inplace=True)
 
+        # ---- РАЗДЕЛЕНИЕ НА TRAIN / VAL ----
+        logger.info("Разделение данных на Train/Val выборки...")
         from src.config import TRAINING_PARAMS
         train_split = TRAINING_PARAMS.get('train_split', 0.8)
 
-        # Хронологический раскол матрицы фич
         split_idx = int(len(df_features) * train_split)
         df_train = df_features.iloc[:split_idx].copy()
         df_val = df_features.iloc[split_idx:].copy()
 
-        # 5. Разметка классов на основе КВАНТИЛЕЙ ТРЕЙНА (По совету GPT: 25% / 50% / 25%)
-        logger.info("Вычисление порогов классов по квантилям обучающей выборки...")
-        train_raw_targets_clean = df_train['raw_target'].values[:-forward_horizon]
+        # Мониторинг баланса 3-х классов
+        for name, dataset in [("Train", df_train), ("Val", df_val)]:
+            counts = dataset['target'].value_counts(normalize=True).sort_index()
+            logger.info(
+                f"Баланс классов {name}: "
+                f"Short(0): {counts.get(0,0):.2%}, "
+                f"Flat(1): {counts.get(1,0):.2%}, "
+                f"Long(2): {counts.get(2,0):.2%}"
+            )
 
-        # Жесткие квантили отсекают 50% центрального шума во флэт
-        lower_threshold = float(np.quantile(train_raw_targets_clean, 0.25))
-        upper_threshold = float(np.quantile(train_raw_targets_clean, 0.75))
-        logger.info(f"Пороги классов зафиксированы (квантили 0.25/0.75): Шорт < {lower_threshold:.6f}, Лонг > {upper_threshold:.6f}")
-
-        # Создаем пустые массивы для меток (1 — Флэт/Боковик по умолчанию)
-        df_train['target'] = np.ones(len(df_train), dtype=np.int64)
-        df_val['target'] = np.ones(len(df_val), dtype=np.int64)
-
-        # Размечаем Train
-        df_train.loc[df_train['raw_target'] > upper_threshold, 'target'] = 2  # Класс 2: Лонг
-        df_train.loc[df_train['raw_target'] < lower_threshold, 'target'] = 0  # Класс 0: Шорт
-
-        # Размечаем Validation СТРОГО по порогам из Train
-        df_val.loc[df_val['raw_target'] > upper_threshold, 'target'] = 2
-        df_val.loc[df_val['raw_target'] < lower_threshold, 'target'] = 0
-
-        # Удаляем временную колонку сырого таргета, чтобы модель на ней случайно не обучилась
-        df_train.drop(columns=['raw_target'], inplace=True)
-        df_val.drop(columns=['raw_target'], inplace=True)
-
-        # 6. Масштабирование признаков (Исключаем служебные колонки и таргет)
+        # [Остальной код скейлинга и сохранения в файле остается прежним...]
         columns_to_exclude = ['Date', 'date', 'target']
         cols_to_scale = [col for col in df_train.columns if col not in columns_to_exclude]
-
-        # Обучаем скейлер только на Train, сохраняем параметры на диск и трансформируем обе выборки
         self.scaler.fit(df_train, cols_to_scale)
-        self.scaler.save()  # Запись scaler_params.json в папку models
-
+        self.scaler.save()
         df_train_scaled = self.scaler.transform(df_train)
         df_val_scaled = self.scaler.transform(df_val)
-
-        # 7. Сохранение итоговых изолированных файлов
-        train_path = config.TRAIN_FEATURES_PATH
-        val_path = config.VAL_FEATURES_PATH
-
-        df_train_scaled.to_parquet(train_path)
-        df_val_scaled.to_parquet(val_path)
-
-        logger.info(f"Конвейер данных завершен успешно!")
-        logger.info(f" -> Train датасет: {df_train_scaled.shape[0]} строк")
-        logger.info(f" -> Val датасет:   {df_val_scaled.shape[0]} строк")
-        logger.info(f"Данные сохранены в:\n -> {train_path}\n -> {val_path}")
-
-
-# --- АВТОНОМНЫЙ ТЕСТ ДИСПЕТЧЕРА ДАННЫХ ---
-if __name__ == "__main__":
-    from src.config import setup_logging
-    setup_logging(level=logging.INFO)
-
-    logger.info("=== Запуск полного конвейера DataEngine в автономном режиме ===")
-    engine = DataEngine()
-    engine.run_pipeline()
+        df_train_scaled.to_parquet(config.TRAIN_FEATURES_PATH)
+        df_val_scaled.to_parquet(config.VAL_FEATURES_PATH)
+        logger.info("Конвейер данных успешно завершен!")

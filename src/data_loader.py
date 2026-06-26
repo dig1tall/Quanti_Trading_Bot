@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 class DataLoader:
     """
     Класс для загрузки, очистки и сохранения исторических рыночных данных через CCXT (Bybit).
+    Оптимизирован под различные таймфреймы, включая дневные (1d).
     """
     def __init__(self, ticker: str = None, interval: str = None, period: str = None):
         self.ticker   = ticker if ticker is not None else DATA_LOAD_PARAMS['ticker']
@@ -28,7 +29,7 @@ class DataLoader:
             self.symbol = "BTC/USDT" # Фолбэк по умолчанию
 
     def _convert_period_to_days(self, period_str: str) -> int:
-        """Вспомогательный метод для конвертации строк вида '30d', '60d' в количество дней."""
+        """Вспомогательный метод для конвертации строк вида '30d', '60d', '1y' в количество дней."""
         try:
             if period_str.endswith('d'):
                 return int(period_str[:-1])
@@ -36,19 +37,19 @@ class DataLoader:
                 return int(period_str[:-2]) * 30
             elif period_str.endswith('y'):
                 return int(period_str[:-1]) * 365
-        except:
-            pass
-        return 60  # Безопасный дефолт, если прилетит что-то странное
+        except Exception as e:
+            logger.warning(f"Ошибка парсинга периода '{period_str}', откат к дефолту 365d. Ошибка: {e}")
+        return 365  # Для дневок дефолт в 1 год выглядит разумнее, чем 60 дней
 
     def download_crypto_data(self) -> pd.DataFrame:
-        """Скачивает глубокую историю минуток с Bybit чанками, сохраняя структуру OHLCV."""
+        """Скачивает историю свечей с Bybit чанками, сохраняя структуру OHLCV."""
         logger.info(f"Запуск загрузки данных для {self.symbol} ({self.interval}, период: {self.period}) через CCXT...")
 
         try:
-            # Инициализируем Bybit (работает без API-ключей для публичных OHLCV)
+            # Инициализируем Bybit
             exchange = ccxt.bybit({
                 'enableRateLimit': True,
-                'options': {'defaultType': 'swap'}  # Бессрочные фьючерсы с максимальной ликвидностью
+                'options': {'defaultType': 'swap'}  # Бессрочные фьючерсы
             })
 
             # Вычисляем глубину истории
@@ -64,7 +65,7 @@ class DataLoader:
             logger.info(f"Запрос истории с {start_date.strftime('%Y-%m-%d')} по {now.strftime('%Y-%m-%d')}...")
 
             while since_timestamp < end_timestamp:
-                # Скачиваем порцию из 1000 свечей
+                # Скачиваем порцию из 1000 свечей (для 1d это ~2.7 года за раз)
                 candles = exchange.fetch_ohlcv(self.symbol, self.interval, since=since_timestamp, limit=1000)
 
                 if not candles:
@@ -72,22 +73,21 @@ class DataLoader:
 
                 all_candles.extend(candles)
 
-                # Смещаем временную метку на открытие последней скачанной свечи + 1 единица интервала (в мс)
-                # Для 1m это 60000мс. Универсально: разница между последней и предпоследней свечой
+                # Универсальное определение шага между свечами
                 if len(candles) > 1:
                     step = candles[-1][0] - candles[-2][0]
                 else:
-                    step = 60000
+                    # Если вернулась 1 свеча, шаг зависит от таймфрейма (дефолт 1d = 86400000 мс)
+                    step = 86400000 if self.interval == '1d' else 60000
 
                 last_candle_time = candles[-1][0]
                 since_timestamp = last_candle_time + step
 
-                # Логируем прогресс раз в несколько итераций, чтобы не спамить
-                if len(all_candles) % 5000 == 0 or len(candles) < 1000:
-                    current_pipeline_date = datetime.fromtimestamp(last_candle_time / 1000, tz=timezone.utc)
-                    logger.info(f"Загружено свечей: {len(all_candles)} | Текущая точка истории: {current_pipeline_date}")
+                # Логируем каждый чанк, так как для 1d их будет очень мало (обычно 1-2 запроса)
+                current_pipeline_date = datetime.fromtimestamp(last_candle_time / 1000, tz=timezone.utc)
+                logger.info(f"Загружено свечей: {len(all_candles)} | Последняя точка: {current_pipeline_date.strftime('%Y-%m-%d')}")
 
-                # Пауза между запросами (Защита от Rate Limit)
+                # Пауза между запросами
                 time.sleep(exchange.rateLimit / 1000)
 
             if not all_candles:
@@ -143,5 +143,6 @@ if __name__ == "__main__":
     if not df_raw.empty:
         print("\nПревью скачанных сырых данных:")
         print(df_raw.tail(3))
+        loader.save_to_parquet(df_raw)
     else:
         logger.error("Тестовая загрузка завершилась сбоем.")
