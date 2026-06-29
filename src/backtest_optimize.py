@@ -14,10 +14,10 @@ from src.model import QuantiGRU
 logger = logging.getLogger(__name__)
 
 def run_optimization_search(val_data_path=None):
-    logger.info("=== Запуск глобальной оптимизации параметров Quanti ===")
+    logger.info("=== Запуск глобальной оптимизации параметров Quanti (Мягкий Выход) ===")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # 1. Инференс модели (считаем вероятности один раз с учетом TEMPERATURE)
+    # 1. Инференс модели (считаем вероятности один раз)
     val_loader = get_backtest_loader()
     model_path = os.path.join(PROJECT_ROOT, "models", "best_quanti_model.pth")
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
@@ -45,7 +45,6 @@ def run_optimization_search(val_data_path=None):
     raw_probs_matrix = np.vstack(all_raw_probs)
 
     # 2. Синхронизация цен
-    # Используем динамический путь, если передан, иначе дефолтный из config
     target_val_path = val_data_path if val_data_path is not None else config.VAL_FEATURES_PATH
     df_features_file = pd.read_parquet(target_val_path)
     val_dates = df_features_file.index[-len(raw_probs_matrix):]
@@ -55,7 +54,7 @@ def run_optimization_search(val_data_path=None):
     val_high = df_raw.loc[val_dates, 'High'].copy()
     val_low = df_raw.loc[val_dates, 'Low'].copy()
 
-    # 3. СЕТКА ПАРАМЕТРОВ ДЛЯ ПЕРЕБОРА (GRID)
+    # 3. СЕТКА ПАРАМЕТРОВ ДЛЯ ПЕРЕБОРА (GRID С УЧЕТОМ МЯГКОГО ВЫХОДА)
     thresholds_long = np.arange(0.51, 0.62, 0.01)
     stop_losses = np.arange(0.02, 0.15, 0.01)
     take_profits = np.arange(0.06, 0.30, 0.01)
@@ -66,6 +65,8 @@ def run_optimization_search(val_data_path=None):
     short_entries_list, short_exits_list = [], []
     param_tuples = []
 
+    exit_threshold = 0.35
+
     for th_long in thresholds_long:
         th_short = th_long - 0.10
         signals = np.zeros(len(raw_probs_matrix), dtype=np.float32)
@@ -73,34 +74,30 @@ def run_optimization_search(val_data_path=None):
 
         for idx in range(len(raw_probs_matrix)):
             prob_vector = raw_probs_matrix[idx]
-            max_prob_class = np.argmax(prob_vector)
-            max_prob = prob_vector[max_prob_class]
-
-            current_threshold = th_long if max_prob_class == 2 else th_short
-
-            if max_prob_class == 2:
-                target_signal = 1.0
-            elif max_prob_class == 0:
-                target_signal = -1.0
-            else:
-                target_signal = 0.0
+            p_short = prob_vector[0]
+            p_flat = prob_vector[1]
+            p_long = prob_vector[2]
 
             if current_signal == 0.0:
-                if max_prob >= current_threshold:
-                    current_signal = target_signal
-            else:
-                if target_signal != current_signal:
-                    if max_prob >= current_threshold:
-                        current_signal = target_signal
+                if p_long >= th_long and p_long > p_short:
+                    current_signal = 1.0
+                elif p_short >= th_short and p_short > p_long:
+                    current_signal = -1.0
+            elif current_signal == 1.0:
+                if p_long < exit_threshold or p_short > p_long or p_flat > p_long:
+                    current_signal = 0.0
+            elif current_signal == -1.0:
+                if p_short < exit_threshold or p_long > p_short or p_flat > p_short:
+                    current_signal = 0.0
 
             signals[idx] = current_signal
 
         signals_series = pd.Series(signals, index=val_close.index)
 
         ent = (signals_series == 1.0)
-        ex = (signals_series == 0.0) | (signals_series == -1.0)
+        ex = (signals_series == 0.0)
         se = (signals_series == -1.0)
-        sx = (signals_series == 0.0) | (signals_series == 1.0)
+        sx = (signals_series == 0.0)
 
         for sl in stop_losses:
             for tp in take_profits:
@@ -145,7 +142,6 @@ def run_optimization_search(val_data_path=None):
 
     best_config = stats_df.index[0]
 
-    # === ВОТ ЭТОГО НЕ ХВАТАЛО: Формируем и возвращаем словарь результатов ===
     best_params_dict = {
         'threshold': float(best_config[0]),
         'stop_loss': float(best_config[1]),
