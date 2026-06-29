@@ -17,7 +17,6 @@ FEATURE_PARAMS = {
     'forward_horizon': 1,
 
     # === НАСТРОЙКИ ТРИНАРНОЙ РАЗМЕТКИ ===
-    # Дневное изменение цены в диапазоне [-0.005, 0.005] (т.е. +-0.5%) считается флэтом
     'flat_threshold': 0.005,
 
     'vol_fast_period': 14,
@@ -34,19 +33,19 @@ MODEL_PARAMS = {
     'sequence_length': 20,
     'hidden_size': 16,
     'num_layers': 1,
-    'output_size': 3,         # === ИЗМЕНЕНО: Строго 3 класса (0: Short, 1: Flat, 2: Long) ===
+    'output_size': 3,         # Строго 3 класса (0: Short, 1: Flat, 2: Long)
     'dropout_rate': 0.2,
     'label_smoothing': 0.05
 }
 
 # --- НАСТРОЙКИ ОБУЧЕНИЯ ---
 TRAINING_PARAMS = {
-    'batch_size': 32,        # Размер батча (золотая середина для стабильных градиентов на GPU)
-    'epochs': 60,             # Максимальное количество эпох (с запасом, Early Stopping остановит раньше)
-    'learning_rate': 3e-4,    # Стартовая скорость обучения (0.0005 — аккуратный шаг для AdamW)
-    'train_split': 0.8,       # Хронологическое разделение: 80% на обучение, 20% на валидацию (без перемешивания!)
-    'device': 'cuda',         # Обучение строго на видеокарте с использованием AMP (ускорение в 1.5–2 раза)
-    'patience': 8,            # Early Stopping: ждем максимум 10 эпох застоя Val Loss, прежде чем завершить процесс
+    'batch_size': 32,
+    'epochs': 60,
+    'learning_rate': 3e-4,
+    'train_split': 0.8,
+    'device': 'cuda',
+    'patience': 8,
     'lr': 3e-4,
     'weight_decay': 0.015,
     'num_workers': 0,
@@ -60,14 +59,10 @@ BACKTEST_PARAMS = {
     'slippage': 0.0005,
     'freq': '1d',
 
-    # === ИЗМЕНЕНО: Жесткий фильтр дребезга ===
-    # Перевес топ-1 класса над топ-2 должен быть минимум 22%
-    # Это отсечет ситуации вроде 40/30/30 и заставит модель сидеть в Flat
-    'threshold': 0.53,
-
-    # === РИСК-МЕНЕДЖМЕНТ ===
-    'stop_loss': 0.08,   # Поджимаем стоп с 3.5% до 2.5% (быстрее выходим из ошибок)
-    'take_profit': 0.28,  # Тейк на 6% (забираем локальные импульсы)
+    # Базовые параметры (будут перезаписаны оптимизатором, если RUN_OPTIMIZATION=True)
+    'threshold': 0.52,
+    'stop_loss': 0.12,
+    'take_profit': 0.07,
     'save_plots': False
 }
 
@@ -75,18 +70,15 @@ BACKTEST_PARAMS = {
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
-# Базовый файл с сырыми ценами
 DATA_FILE_NAME = f"{DATA_LOAD_PARAMS['ticker']}_{DATA_LOAD_PARAMS['interval']}.parquet"
 DATA_FILE_PATH = os.path.join(DATA_DIR, DATA_FILE_NAME)
 
-# Итоговый файл со сгенерированными фичами и скейлингом
-CLEAN_TICKER = DATA_LOAD_PARAMS['ticker'].replace("-", "_") # BTC-USDT -> BTC_USDT
+CLEAN_TICKER = DATA_LOAD_PARAMS['ticker'].replace("-", "_")
 INTERVAL = DATA_LOAD_PARAMS['interval']
 
 FEATURES_FILE_NAME = f"{CLEAN_TICKER}_{DATA_LOAD_PARAMS['interval']}_features.parquet"
 FEATURES_FILE_PATH = os.path.join(DATA_DIR, FEATURES_FILE_NAME)
 
-# --- ДОБАВЛЯЕМ ДИНАМИЧЕСКИЕ ПУТИ ДЛЯ TRAIN / VAL ---
 TRAIN_FEATURES_PATH = os.path.join(DATA_DIR, f"{CLEAN_TICKER}_{INTERVAL}_train.parquet")
 VAL_FEATURES_PATH = os.path.join(DATA_DIR, f"{CLEAN_TICKER}_{INTERVAL}_val.parquet")
 
@@ -101,6 +93,17 @@ def setup_logging(level=logging.INFO):
         format=LOG_FORMAT,
         datefmt=LOG_DATE_FORMAT,
         handlers=[
-            logging.StreamHandler() # Вывод в консоль
+            logging.StreamHandler()
         ]
     )
+
+def update_backtest_params(best_params: dict):
+    """Динамически обновляет конфигурацию бэктеста в оперативной памяти модулей"""
+    global BACKTEST_PARAMS
+    logger = logging.getLogger(__name__)
+    logger.info("[Config] Динамическая перезапись параметров бэктеста результатами оптимизации:")
+    for key, value in best_params.items():
+        if key in BACKTEST_PARAMS:
+            old_value = BACKTEST_PARAMS[key]
+            BACKTEST_PARAMS[key] = value
+            logger.info(f"  -> {key}: {old_value} ===> {value}")
