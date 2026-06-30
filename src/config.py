@@ -61,6 +61,7 @@ BACKTEST_PARAMS = {
 
     # Базовые параметры (будут перезаписаны оптимизатором, если RUN_OPTIMIZATION=True)
     'threshold': 0.52,
+    'soft_exit_threshold': 0.33,
     'stop_loss': 0.12,
     'take_profit': 0.07,
     'save_plots': False
@@ -98,12 +99,13 @@ def setup_logging(level=logging.INFO):
     )
 
 def update_backtest_params(best_params: dict):
-    """Динамически обновляет конфигурацию бэктеста в оперативной памяти модулей"""
+    """Динамически обновляет конфигурацию бэктеста в памяти результатами оптимизации"""
     global BACKTEST_PARAMS
     logger = logging.getLogger(__name__)
     logger.info("[Config] Динамическая перезапись параметров бэктеста результатами оптимизации:")
-    for key, value in best_params.items():
-        if key in BACKTEST_PARAMS:
-            old_value = BACKTEST_PARAMS[key]
-            BACKTEST_PARAMS[key] = value
-            logger.info(f"  -> {key}: {old_value} ===> {value}")
+
+    for param_name, new_value in best_params.items():
+        if param_name in BACKTEST_PARAMS or param_name == 'soft_exit_threshold':
+            old_value = BACKTEST_PARAMS.get(param_name, "None")
+            BACKTEST_PARAMS[param_name] = new_value
+            logger.info(f"   -> {param_name}: {old_value} ===> {new_value}")

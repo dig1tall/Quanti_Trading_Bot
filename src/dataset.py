@@ -93,7 +93,7 @@ def get_separated_data_loaders(sequence_length: int = None, batch_size: int = No
         val_dataset,
         batch_size=b_size,
         shuffle=False,
-        drop_last=False,
+        drop_last=True,
         pin_memory=pin_memory,
         num_workers=num_workers,
         persistent_workers=persistent_workers

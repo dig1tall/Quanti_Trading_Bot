@@ -14,7 +14,7 @@ from src.model import QuantiGRU
 logger = logging.getLogger(__name__)
 
 def run_optimization_search(val_data_path=None):
-    logger.info("=== Запуск глобальной оптимизации параметров Quanti (Мягкий Выход) ===")
+    logger.info("=== Запуск глобальной оптимизации параметров Quanti ===")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # 1. Инференс модели (считаем вероятности один раз)
@@ -54,18 +54,19 @@ def run_optimization_search(val_data_path=None):
     val_high = df_raw.loc[val_dates, 'High'].copy()
     val_low = df_raw.loc[val_dates, 'Low'].copy()
 
-    # 3. СЕТКА ПАРАМЕТРОВ ДЛЯ ПЕРЕБОРА (GRID С УЧЕТОМ МЯГКОГО ВЫХОДА)
-    thresholds_long = np.arange(0.51, 0.62, 0.01)
-    stop_losses = np.arange(0.02, 0.15, 0.01)
-    take_profits = np.arange(0.06, 0.30, 0.01)
+    # 3. СЕТКА ПАРАМЕТРОВ ДЛЯ ПЕРЕБОРА (ТРЕХМЕРНАЯ)
+    thresholds_long = np.arange(0.51, 0.62, 0.01)  # 11 точек
+    stop_losses = np.arange(0.005, 0.05, 0.005)      # 9 точек
+    take_profits = np.arange(0.03, 0.20, 0.01)     # 17 точек
 
-    logger.info(f"Размерность сетки: Thresholds={len(thresholds_long)}, SL={len(stop_losses)}, TP={len(take_profits)}")
+    # Извлекаем зафиксированный порог мягкого выхода напрямую из конфига
+    exit_threshold = BACKTEST_PARAMS['soft_exit_threshold']
+
+    logger.info(f"Размерность сетки: Thresholds={len(thresholds_long)}, SL={len(stop_losses)}, TP={len(take_profits)} (SoftExit зафиксирован на {exit_threshold})")
 
     entries_list, exits_list = [], []
     short_entries_list, short_exits_list = [], []
     param_tuples = []
-
-    exit_threshold = 0.35
 
     for th_long in thresholds_long:
         th_short = th_long - 0.10
@@ -113,7 +114,7 @@ def run_optimization_search(val_data_path=None):
     m_short_entries = pd.concat(short_entries_list, axis=1, keys=m_index)
     m_short_exits = pd.concat(short_exits_list, axis=1, keys=m_index)
 
-    logger.info("Запуск параллельного векторного бэктеста...")
+    logger.info(f"Запуск параллельного векторного бэктеста для {len(m_index)} комбинаций...")
     sl_array = m_index.get_level_values('stop_loss').values
     tp_array = m_index.get_level_values('take_profit').values
 
@@ -127,12 +128,13 @@ def run_optimization_search(val_data_path=None):
         upon_stop_exit=1, accumulate=False
     )
 
+    # ИСПРАВЛЕНО: Явно передаем index=m_index, чтобы не потерять имена параметров при сортировке
     stats_df = pd.DataFrame({
         'Total Return [%]': portfolio.total_return() * 100,
         'Sharpe Ratio': portfolio.sharpe_ratio(),
         'Max Drawdown [%]': portfolio.max_drawdown() * 100,
         'Total Trades': portfolio.trades.count()
-    }).sort_values(by='Total Return [%]', ascending=False)
+    }, index=m_index).sort_values(by='Total Return [%]', ascending=False)
 
     print("\n" + "="*70)
     print("   ТОП-10 ЛУЧШИХ КОМБИНАЦИЙ ПАРАМЕТРОВ ПО TOTAL RETURN")
@@ -142,11 +144,14 @@ def run_optimization_search(val_data_path=None):
 
     best_config = stats_df.index[0]
 
+    # Возвращаем полный конфиг, включая зафиксированный soft_exit, обратно в main.py
     best_params_dict = {
         'threshold': float(best_config[0]),
         'stop_loss': float(best_config[1]),
-        'take_profit': float(best_config[2])
+        'take_profit': float(best_config[2]),
+        'soft_exit_threshold': float(exit_threshold)
     }
+    logger.info(f"[Оптимизатор] Оптимальная конфигурация определена: TH={best_params_dict['threshold']:.2f}, SL={best_params_dict['stop_loss']:.3f}, TP={best_params_dict['take_profit']:.2f}")
     return best_params_dict
 
 if __name__ == "__main__":

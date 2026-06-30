@@ -55,7 +55,7 @@ def run_backtest():
     # 4. ИНТЕРПРЕТАЦИЯ СИГНАЛОВ (МЯГКИЙ ВЫХОД)
     entry_threshold_long = BACKTEST_PARAMS.get('threshold', 0.52)
     entry_threshold_short = entry_threshold_long - 0.10
-    exit_threshold = 0.35
+    exit_threshold = BACKTEST_PARAMS.get('soft_exit_threshold', 0.33)
 
     logger.info(f"Рабочие пороги ВХОДА: Long >= {entry_threshold_long:.2f}, Short >= {entry_threshold_short:.2f}")
     logger.info(f"Порог мягкого ВЫХОДА в кэш: < {exit_threshold:.2f}")
