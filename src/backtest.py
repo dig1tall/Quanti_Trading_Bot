@@ -53,8 +53,8 @@ def run_backtest():
     targets = np.array(all_targets)
 
     # 4. ИНТЕРПРЕТАЦИЯ СИГНАЛОВ (МЯГКИЙ ВЫХОД)
-    entry_threshold_long = BACKTEST_PARAMS.get('threshold', 0.52)
-    entry_threshold_short = entry_threshold_long - 0.10
+    entry_threshold_long = BACKTEST_PARAMS.get('threshold_long', 0.52)
+    entry_threshold_short = BACKTEST_PARAMS.get('threshold_short', 0.42)
     exit_threshold = BACKTEST_PARAMS.get('soft_exit_threshold', 0.33)
 
     logger.info(f"Рабочие пороги ВХОДА: Long >= {entry_threshold_long:.2f}, Short >= {entry_threshold_short:.2f}")

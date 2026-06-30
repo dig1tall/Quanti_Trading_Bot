@@ -14,7 +14,7 @@ from src.model import QuantiGRU
 logger = logging.getLogger(__name__)
 
 def run_optimization_search(val_data_path=None):
-    logger.info("=== Запуск глобальной оптимизации параметров Quanti ===")
+    logger.info("=== Запуск глобальной оптимизации параметров Quanti (Лонг + Шорт Пороги) ===")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # 1. Инференс модели (считаем вероятности один раз)
@@ -54,67 +54,76 @@ def run_optimization_search(val_data_path=None):
     val_high = df_raw.loc[val_dates, 'High'].copy()
     val_low = df_raw.loc[val_dates, 'Low'].copy()
 
-    # 3. СЕТКА ПАРАМЕТРОВ ДЛЯ ПЕРЕБОРА (ТРЕХМЕРНАЯ)
-    thresholds_long = np.arange(0.51, 0.62, 0.01)  # 11 точек
-    stop_losses = np.arange(0.005, 0.05, 0.005)      # 9 точек
-    take_profits = np.arange(0.03, 0.20, 0.01)     # 17 точек
+    # 3. СЕТКА ПАРАМЕТРОВ ДЛЯ ПЕРЕБОРА (ЧЕТЫРЕХМЕРНАЯ)
+    # !!!=== НЕОБХОДИМО СДЕЛАТЬ СИММЕТРИЧНЫЕ ДИАПАЗОНЫ ДЛЯ ОБЕИХ ЧУВСТВИТЕЛЬНОСТЕЙ ОТНОСИТЕЛЬНО 0.5 ПЕРЕД ЗАПУСКОМ ===!!!
+    thresholds_long = np.arange(0.51, 0.62, 0.01)   # 6 точек (шаг 0.02 для контроля скорости)
+    thresholds_short = np.arange(0.30, 0.45, 0.01)  # 8 точек
+    stop_losses = np.arange(0.005, 0.05, 0.005)       # 4 точки
+    take_profits = np.arange(0.03, 0.20, 0.01)      # 7 точек
 
-    # Извлекаем зафиксированный порог мягкого выхода напрямую из конфига
+    # Извлекаем зафиксированный порог мягкого выхода
     exit_threshold = BACKTEST_PARAMS['soft_exit_threshold']
 
-    logger.info(f"Размерность сетки: Thresholds={len(thresholds_long)}, SL={len(stop_losses)}, TP={len(take_profits)} (SoftExit зафиксирован на {exit_threshold})")
+    logger.info(f"Размерность сетки: Th_Long={len(thresholds_long)}, Th_Short={len(thresholds_short)}, SL={len(stop_losses)}, TP={len(take_profits)}")
+    logger.info(f"Всего комбинаций для vectorbt: {len(thresholds_long) * len(thresholds_short) * len(stop_losses) * len(take_profits)}")
 
     entries_list, exits_list = [], []
     short_entries_list, short_exits_list = [], []
     param_tuples = []
 
+    # Генерируем маски сигналов пошагово во вложенных циклах по порогам входа
     for th_long in thresholds_long:
-        th_short = th_long - 0.10
-        signals = np.zeros(len(raw_probs_matrix), dtype=np.float32)
-        current_signal = 0.0
+        for th_short in thresholds_short:
 
-        for idx in range(len(raw_probs_matrix)):
-            prob_vector = raw_probs_matrix[idx]
-            p_short = prob_vector[0]
-            p_flat = prob_vector[1]
-            p_long = prob_vector[2]
+            signals = np.zeros(len(raw_probs_matrix), dtype=np.float32)
+            current_signal = 0.0
 
-            if current_signal == 0.0:
-                if p_long >= th_long and p_long > p_short:
-                    current_signal = 1.0
-                elif p_short >= th_short and p_short > p_long:
-                    current_signal = -1.0
-            elif current_signal == 1.0:
-                if p_long < exit_threshold or p_short > p_long or p_flat > p_long:
-                    current_signal = 0.0
-            elif current_signal == -1.0:
-                if p_short < exit_threshold or p_long > p_short or p_flat > p_short:
-                    current_signal = 0.0
+            for idx in range(len(raw_probs_matrix)):
+                prob_vector = raw_probs_matrix[idx]
+                p_short = prob_vector[0]
+                p_flat = prob_vector[1]
+                p_long = prob_vector[2]
 
-            signals[idx] = current_signal
+                if current_signal == 0.0:
+                    if p_long >= th_long and p_long > p_short:
+                        current_signal = 1.0
+                    elif p_short >= th_short and p_short > p_long:
+                        current_signal = -1.0
+                elif current_signal == 1.0:
+                    if p_long < exit_threshold or p_short > p_long or p_flat > p_long:
+                        current_signal = 0.0
+                elif current_signal == -1.0:
+                    if p_short < exit_threshold or p_long > p_short or p_flat > p_short:
+                        current_signal = 0.0
 
-        signals_series = pd.Series(signals, index=val_close.index)
+                signals[idx] = current_signal
 
-        ent = (signals_series == 1.0)
-        ex = (signals_series == 0.0)
-        se = (signals_series == -1.0)
-        sx = (signals_series == 0.0)
+            signals_series = pd.Series(signals, index=val_close.index)
 
-        for sl in stop_losses:
-            for tp in take_profits:
-                entries_list.append(ent)
-                exits_list.append(ex)
-                short_entries_list.append(se)
-                short_exits_list.append(sx)
-                param_tuples.append((th_long, sl, tp))
+            ent = (signals_series == 1.0)
+            ex = (signals_series == 0.0)
+            se = (signals_series == -1.0)
+            sx = (signals_series == 0.0)
 
-    m_index = pd.MultiIndex.from_tuples(param_tuples, names=['threshold', 'stop_loss', 'take_profit'])
+            # Перемножаем с сеткой SL/TP
+            for sl in stop_losses:
+                for tp in take_profits:
+                    entries_list.append(ent)
+                    exits_list.append(ex)
+                    short_entries_list.append(se)
+                    short_exits_list.append(sx)
+                    param_tuples.append((th_long, th_short, sl, tp))
+
+    # Создаем 4-уровневый MultiIndex
+    m_index = pd.MultiIndex.from_tuples(param_tuples, names=['th_long', 'th_short', 'stop_loss', 'take_profit'])
+
+    logger.info("Сборка матриц сигналов...")
     m_entries = pd.concat(entries_list, axis=1, keys=m_index)
     m_exits = pd.concat(exits_list, axis=1, keys=m_index)
     m_short_entries = pd.concat(short_entries_list, axis=1, keys=m_index)
     m_short_exits = pd.concat(short_exits_list, axis=1, keys=m_index)
 
-    logger.info(f"Запуск параллельного векторного бэктеста для {len(m_index)} комбинаций...")
+    logger.info("Запуск параллельного векторного бэктеста...")
     sl_array = m_index.get_level_values('stop_loss').values
     tp_array = m_index.get_level_values('take_profit').values
 
@@ -128,7 +137,6 @@ def run_optimization_search(val_data_path=None):
         upon_stop_exit=1, accumulate=False
     )
 
-    # ИСПРАВЛЕНО: Явно передаем index=m_index, чтобы не потерять имена параметров при сортировке
     stats_df = pd.DataFrame({
         'Total Return [%]': portfolio.total_return() * 100,
         'Sharpe Ratio': portfolio.sharpe_ratio(),
@@ -136,22 +144,23 @@ def run_optimization_search(val_data_path=None):
         'Total Trades': portfolio.trades.count()
     }, index=m_index).sort_values(by='Total Return [%]', ascending=False)
 
-    print("\n" + "="*70)
+    print("\n" + "="*80)
     print("   ТОП-10 ЛУЧШИХ КОМБИНАЦИЙ ПАРАМЕТРОВ ПО TOTAL RETURN")
-    print("="*70)
+    print("="*80)
     print(stats_df.head(10).to_string())
-    print("="*70)
+    print("="*80)
 
     best_config = stats_df.index[0]
 
-    # Возвращаем полный конфиг, включая зафиксированный soft_exit, обратно в main.py
+    # Возвращаем результаты (main.py должен уметь принимать threshold_short)
     best_params_dict = {
-        'threshold': float(best_config[0]),
-        'stop_loss': float(best_config[1]),
-        'take_profit': float(best_config[2]),
+        'threshold_long': float(best_config[0]),        # для лонга (обратная совместимость)
+        'threshold_short': float(best_config[1]),  # новый параметр для шорта
+        'stop_loss': float(best_config[2]),
+        'take_profit': float(best_config[3]),
         'soft_exit_threshold': float(exit_threshold)
     }
-    logger.info(f"[Оптимизатор] Оптимальная конфигурация определена: TH={best_params_dict['threshold']:.2f}, SL={best_params_dict['stop_loss']:.3f}, TP={best_params_dict['take_profit']:.2f}")
+    logger.info(f"[Оптимизатор] Оптимальные параметры: TH_Long={best_params_dict['threshold_long']:.2f}, TH_Short={best_params_dict['threshold_short']:.2f}, SL={best_params_dict['stop_loss']:.3f}, TP={best_params_dict['take_profit']:.2f}")
     return best_params_dict
 
 if __name__ == "__main__":

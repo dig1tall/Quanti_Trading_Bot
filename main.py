@@ -34,8 +34,8 @@ def main():
     model_engine = ModelEngine()
 
     # === НАСТРОЙКА ФЛАГОВ ===
-    RUN_DATA_PIPELINE = True   # Используем готовый кэш данных
-    RUN_MODEL_TRAINING = True  # Используем уже обученную модель
+    RUN_DATA_PIPELINE = False   # Используем готовый кэш данных
+    RUN_MODEL_TRAINING = False  # Используем уже обученную модель
     RUN_OPTIMIZATION = True     # ВКЛЮЧАЕМ оптимизатор под новую логику выхода!
     RUN_BACKTESTING = True      # ВКЛЮЧАЕМ финальный бэктест
 

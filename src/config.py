@@ -60,7 +60,8 @@ BACKTEST_PARAMS = {
     'freq': '1d',
 
     # Базовые параметры (будут перезаписаны оптимизатором, если RUN_OPTIMIZATION=True)
-    'threshold': 0.52,
+    'threshold_long': 0.52,
+    'threshold_short': 0.42,
     'soft_exit_threshold': 0.33,
     'stop_loss': 0.12,
     'take_profit': 0.07,
@@ -105,7 +106,7 @@ def update_backtest_params(best_params: dict):
     logger.info("[Config] Динамическая перезапись параметров бэктеста результатами оптимизации:")
 
     for param_name, new_value in best_params.items():
-        if param_name in BACKTEST_PARAMS or param_name == 'soft_exit_threshold':
+        if param_name in BACKTEST_PARAMS:
             old_value = BACKTEST_PARAMS.get(param_name, "None")
             BACKTEST_PARAMS[param_name] = new_value
             logger.info(f"   -> {param_name}: {old_value} ===> {new_value}")
