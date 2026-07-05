@@ -89,7 +89,7 @@ def train_model():
     # Инициализируем наш кастомный комбинированный лосс
     criterion = QuantiTradingLoss(class_weights=class_weights_tensor, alpha_ordinal=0.6, gamma=2.0)
 
-    optimizer = optim.AdamW(model.parameters(), lr=TRAINING_PARAMS['lr'], weight_decay=TRAINING_PARAMS['weight_decay'])
+    optimizer = optim.AdamW(model.parameters(), lr=TRAINING_PARAMS['learning_rate'], weight_decay=TRAINING_PARAMS['weight_decay'])
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
 
     use_amp = device.type == 'cuda'

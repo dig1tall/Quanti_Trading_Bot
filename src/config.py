@@ -42,11 +42,10 @@ MODEL_PARAMS = {
 TRAINING_PARAMS = {
     'batch_size': 32,
     'epochs': 60,
-    'learning_rate': 3e-4,
+    'learning_rate': 1e-3,
     'train_split': 0.8,
     'device': 'cuda',
-    'patience': 8,
-    'lr': 3e-4,
+    'patience': 15,
     'weight_decay': 0.015,
     'num_workers': 0,
     'min_delta': 0.001
