@@ -30,7 +30,7 @@ class DataValidator:
     def validate_dataset(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Проверяет DataFrame на аномалии, пропуски дней/минут и отрицательные цены.
-        При обнаружении дыр в истории выбрасывает ValueError.
+        При обнаружении мелких дыр заполняет их методом ffill, при крупных — выбрасывает ValueError.
         """
         if df.empty:
             logger.error("Передан пустой датасет. Валидация невозможна.")
@@ -42,7 +42,7 @@ class DataValidator:
         # 1. Сортировка по временному индексу
         df_fixed = df_fixed.sort_index()
 
-        # 2. Проверка непрерывности сетки (Падаем, если есть пропуски)
+        # 2. Проверка непрерывности сетки и интерполяция мелких пропусков
         if self.freq and isinstance(df_fixed.index, pd.DatetimeIndex):
             start_time = df_fixed.index.min()
             end_time = df_fixed.index.max()
@@ -52,12 +52,23 @@ class DataValidator:
             missing_steps = len(expected_index) - len(df_fixed)
 
             if missing_steps > 0:
-                logger.error(f"[КРИТИЧЕСКАЯ АНОМАЛИЯ] Обнаружено {missing_steps} пропущенных баров в истории!")
-                raise ValueError(f"История повреждена: отсутствует {missing_steps} баров таймфрейма {self.freq}.")
+                if missing_steps <= 3:  # Локальный сбой тестнета (до 3 баров) — латаем на лету
+                    logger.warning(
+                        f"[АНОМАЛИЯ] Обнаружено {missing_steps} пропущенных баров в истории! "
+                        f"Автоматически восстанавливаем сетку через reindex() и ffill()..."
+                    )
+                    # Приводим к идеальному индексу, создавая пустые строки для пропущенных дат
+                    df_fixed = df_fixed.reindex(expected_index)
+                    # Заполняем NaN значениями предыдущего доступного дня (Open, High, Low, Close, Volume)
+                    df_fixed = df_fixed.ffill()
+                else:
+                    # Если пропущено много данных, это критично для фичей (например, скользящих средних)
+                    logger.error(f"[КРИТИЧЕСКАЯ АНОМАЛИЯ] Слишком много пропусков ({missing_steps} баров)! Конвейер остановлен.")
+                    raise ValueError(f"История повреждена: отсутствует {missing_steps} баров таймфрейма {self.freq}.")
             else:
                 logger.info("Пропусков временной сетки не обнаружено. Индекс идеален и непрерывен.")
 
-        # 3. Финальная проверка на системные NaN (например, если что-то просочилось)
+        # 3. Финальная проверка на системные NaN (например, если что-то еще просочилось)
         nan_counts = df_fixed.isna().sum().sum()
         if nan_counts > 0:
             logger.warning(f"Обнаружены NaN в истории ({nan_counts} шт.). Удаляем некорректные строки.")

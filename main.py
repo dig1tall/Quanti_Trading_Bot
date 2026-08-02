@@ -7,6 +7,7 @@ import src.config as config
 from src.config import setup_logging
 from src.data_engine import DataEngine
 from src.model_engine import ModelEngine
+from src.execution import run_infinite_loop
 
 try:
     from src.backtest_optimize import run_optimization_search
@@ -38,6 +39,7 @@ def main():
     RUN_MODEL_TRAINING = True  # Используем уже обученную модель
     RUN_OPTIMIZATION = True     # ВКЛЮЧАЕМ оптимизатор под новую логику выхода!
     RUN_BACKTESTING = True      # ВКЛЮЧАЕМ финальный бэктест
+    RUN_LIVE = False
 
     # --- ФАЗА 1 ---
     if RUN_DATA_PIPELINE:
@@ -63,6 +65,10 @@ def main():
     if RUN_BACKTESTING:
         logger.info("[ФАЗА 3] Симуляция торговой стратегии на исторических данных...")
         model_engine.run_backtest()
+
+    if RUN_LIVE:
+        logger.info("[ФАЗА 4] Перевод платформы в режим LIVE постоянного трейдинга...")
+        run_infinite_loop()
 
     logger.info("==================================================")
     logger.info("   РАБОТА ВСЕХ СИСТЕМ QUANTI ЗАВЕРШЕНА    ")

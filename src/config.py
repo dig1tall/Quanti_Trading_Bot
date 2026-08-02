@@ -1,5 +1,13 @@
 import os
 import logging
+from dotenv import load_dotenv
+
+load_dotenv()
+API_PARAMS = {
+    'api_key': os.getenv('BYBIT_DEMO_API_KEY', ''),
+    'secret': os.getenv('BYBIT_DEMO_API_SECRET', ''),
+    'enable_demo': True  # True включает тестовую сеть (Sandbox)
+}
 
 DATA_LOAD_PARAMS = {
     'ticker': "BTC-USDT",
@@ -59,17 +67,18 @@ BACKTEST_PARAMS = {
     'freq': '1d',
 
     # Базовые параметры (будут перезаписаны оптимизатором, если RUN_OPTIMIZATION=True)
-    'threshold_long': 0.52,
-    'threshold_short': 0.42,
+    'threshold_long': 0.515,
+    'threshold_short': 0.39,
     'soft_exit_threshold': 0.33,
-    'stop_loss': 0.12,
-    'take_profit': 0.07,
+    'stop_loss': 0.105,
+    'take_profit': 0.09,
     'save_plots': False
 }
 
 # --- ПУТИ К ФАЙЛАМ ---
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 
 DATA_FILE_NAME = f"{DATA_LOAD_PARAMS['ticker']}_{DATA_LOAD_PARAMS['interval']}.parquet"
 DATA_FILE_PATH = os.path.join(DATA_DIR, DATA_FILE_NAME)

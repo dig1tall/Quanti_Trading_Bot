@@ -76,6 +76,7 @@ class DataEngine:
 
         split_idx = int(len(df_features) * train_split)
         df_train = df_features.iloc[:split_idx].copy()
+        df_train = df_train.iloc[:-1]
         df_val = df_features.iloc[split_idx:].copy()
 
         # Мониторинг баланса 3-х классов

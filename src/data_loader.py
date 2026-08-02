@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from src import config
 from src.config import DATA_LOAD_PARAMS
+from src.config import API_PARAMS
 
 # Инициализация логгера для текущего модуля
 logger = logging.getLogger(__name__)
@@ -49,8 +50,11 @@ class DataLoader:
             # Инициализируем Bybit
             exchange = ccxt.bybit({
                 'enableRateLimit': True,
-                'options': {'defaultType': 'swap'}  # Бессрочные фьючерсы
             })
+            if API_PARAMS.get('enable_demo', False):
+                exchange.set_sandbox_mode(True)
+                logger.info("CCXT: Успешно активирован режим Sandbox (Demo Bybit).")
+
 
             # Вычисляем глубину истории
             days_to_download = self._convert_period_to_days(self.period)
