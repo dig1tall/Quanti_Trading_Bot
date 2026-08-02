@@ -14,7 +14,7 @@ from src.model import QuantiGRU
 logger = logging.getLogger(__name__)
 
 def run_backtest():
-    logger.info("=== Запуск промышленного бэктестинга Quanti Ver 2.0.0 (Мягкий Выход) ===")
+    logger.info("=== Запуск промышленного бэктестинга Quanti Ver 2.1.0 (Fixed Bias & Signals) ===")
     device = torch.device(TRAINING_PARAMS.get('device', 'cpu') if torch.cuda.is_available() else 'cpu')
 
     val_loader = get_backtest_loader()
@@ -52,7 +52,12 @@ def run_backtest():
     raw_probs_matrix = np.vstack(all_raw_probs)
     targets = np.array(all_targets)
 
-    # 4. ИНТЕРПРЕТАЦИЯ СИГНАЛОВ (МЯГКИЙ ВЫХОД)
+    # 1. ЧЕСТНЫЕ МЕТРИКИ МОДЕЛИ (Оправданный Flat)
+    # Вычисляем истинные классы предсказаний через argmax, а не через состояние позиции
+    raw_model_preds = np.argmax(raw_probs_matrix, axis=1)
+    total_accuracy = np.mean(raw_model_preds == targets) * 100
+
+    # 2. ИНТЕРПРЕТАЦИЯ СИГНАЛОВ И ЛОГИКА ТОРГОВЛИ
     entry_threshold_long = BACKTEST_PARAMS.get('threshold_long', 0.52)
     entry_threshold_short = BACKTEST_PARAMS.get('threshold_short', 0.42)
     exit_threshold = BACKTEST_PARAMS.get('soft_exit_threshold', 0.33)
@@ -65,14 +70,13 @@ def run_backtest():
 
     for idx in range(len(raw_probs_matrix)):
         prob_vector = raw_probs_matrix[idx]
-        p_short = prob_vector[0]
-        p_flat = prob_vector[1]
-        p_long = prob_vector[2]
+        p_short, p_flat, p_long = prob_vector[0], prob_vector[1], prob_vector[2]
 
         if current_signal == 0.0:
-            if p_long >= entry_threshold_long and p_long > p_short:
+            # Вход только если соответствующий трендовый класс доминирует над Flat и альтернативой
+            if p_long >= entry_threshold_long and p_long > p_short and p_long > p_flat:
                 current_signal = 1.0
-            elif p_short >= entry_threshold_short and p_short > p_long:
+            elif p_short >= entry_threshold_short and p_short > p_long and p_short > p_flat:
                 current_signal = -1.0
         elif current_signal == 1.0:
             if p_long < exit_threshold or p_short > p_long or p_flat > p_long:
@@ -83,14 +87,17 @@ def run_backtest():
 
         signals[idx] = current_signal
 
-    # 5. ХРОНОЛОГИЧЕСКАЯ СИНХРОНИЗАЦИЯ ЦЕН
+    # 3. ТОЧНАЯ СИНХРОНИЗАЦИЯ ДАТ И УСТРАНЕНИЕ LOOK-AHEAD BIAS
     val_path = config.VAL_FEATURES_PATH
     df_features_file = pd.read_parquet(val_path)
     for date_col in ['Date', 'date']:
         if date_col in df_features_file.columns:
             df_features_file.set_index(date_col, inplace=True)
     df_features_file = df_features_file.sort_index()
-    val_dates = df_features_file.index[-len(targets):]
+
+    # Берем срез дат, строго совпадающий с выходами PyTorch Dataset
+    seq_len = MODEL_PARAMS.get('sequence_length', 20)
+    val_dates = df_features_file.index[seq_len - 1:]
 
     df_raw = pd.read_parquet(os.path.join(config.DATA_DIR, "BTC-USDT_1d.parquet"))
     for date_col in ['Date', 'date']:
@@ -99,39 +106,45 @@ def run_backtest():
     df_raw = df_raw.sort_index()
 
     val_close = df_raw.loc[val_dates, 'Close'].copy()
-    signals_series = pd.Series(signals, name='Quanti_Signals', index=val_close.index)
+    val_high = df_raw.loc[val_dates, 'High'].copy()
+    val_low = df_raw.loc[val_dates, 'Low'].copy()
 
-    # 6. КОНСТРУИРОВАНИЕ МАСОК ОРДЕРОВ
+    # КРИТИЧЕСКИ ВАЖНО: Сдвигаем сигналы на 1 свечу вперед (.shift(1)),
+    # так как сигнал от закрытия бара T может быть исполнен только на баре T+1!
+    signals_series = pd.Series(signals, index=val_close.index).shift(1).fillna(0.0)
+
+    # 4. МАСКИ ОРДЕРОВ
     entries = (signals_series == 1.0)
     exits = (signals_series == 0.0)
     short_entries = (signals_series == -1.0)
     short_exits = (signals_series == 0.0)
 
-    # 7. ДВИЖОК СИМУЛЯЦИИ ПОРТФЕЛЯ
+    # 5. ДВИЖОК СИМУЛЯЦИИ VECTORBT С ФИКСИРОВАННЫМ РАЗМЕРОМ ПОЗИЦИИ
     portfolio = vbt.Portfolio.from_signals(
         close=val_close,
-        high=df_raw.loc[val_dates, 'High'],
-        low=df_raw.loc[val_dates, 'Low'],
-        entries=entries, exits=exits,
-        short_entries=short_entries, short_exits=short_exits,
-        init_cash=BACKTEST_PARAMS['init_cash'],
-        fees=BACKTEST_PARAMS['fee_rate'],
-        slippage=BACKTEST_PARAMS['slippage'],
-        freq=BACKTEST_PARAMS['freq'],
-        sl_stop=BACKTEST_PARAMS.get('stop_loss', None),
-        tp_stop=BACKTEST_PARAMS.get('take_profit', None),
-        upon_stop_exit=1, accumulate=False
+        high=val_high,
+        low=val_low,
+        entries=entries,
+        exits=exits,
+        short_entries=short_entries,
+        short_exits=short_exits,
+        size=0.1,
+        size_type='percent',
+        sl_stop=BACKTEST_PARAMS.get('stop_loss'),
+        tp_stop=BACKTEST_PARAMS.get('take_profit'),
+        init_cash=BACKTEST_PARAMS.get('init_cash', 10000.0), # <-- Синхронизируем стартовый капитал
+        fees=BACKTEST_PARAMS.get('fee_rate', 0.0),            # <-- Подключаем комиссии
+        slippage=BACKTEST_PARAMS.get('slippage', 0.0),        # <-- Подключаем проскальзывание
+        freq='1D'
     )
 
-    # 8. РАСЧЕТ МЕТРИК
-    pred_classes = np.zeros(len(signals))
-    pred_classes[signals == 1.0] = 2
-    pred_classes[signals == 0.0] = 1
-    pred_classes[signals == -1.0] = 0
-    total_accuracy = np.mean(pred_classes == targets) * 100
+    # 6. РАСЧЕТ И ВЫВОД КОРРЕКТНЫХ МЕТРИК
+    unique_preds, pred_counts = np.unique(raw_model_preds, return_counts=True)
+    pred_dist = dict(zip(unique_preds, pred_counts))
 
     logger.info("=== ИТОГОВЫЕ МЕТРИКИ СИМУЛЯЦИИ VECTORBT ===")
-    logger.info(f"Общая точность модели (Total Accuracy): {total_accuracy:.2f}%")
+    logger.info(f"Общая точность модели (Total Model Accuracy): {total_accuracy:.2f}%")
+    logger.info(f"Распределение сырых предсказаний модели (0: Short, 1: Flat, 2: Long): {pred_dist}")
     logger.info(f"\n{portfolio.stats().to_string()}")
 
     if BACKTEST_PARAMS.get('save_plots', False):

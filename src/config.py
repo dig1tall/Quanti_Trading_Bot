@@ -25,7 +25,7 @@ FEATURE_PARAMS = {
     'forward_horizon': 1,
 
     # === НАСТРОЙКИ ТРИНАРНОЙ РАЗМЕТКИ ===
-    'flat_threshold': 0.005,
+    'flat_threshold': 0.01,
 
     'vol_fast_period': 14,
     'vol_slow_period': 60,

@@ -69,7 +69,8 @@ def train_model():
 
     # ВМЕСТО АВТОМАТИКИ: Намеренно занижаем вес флэта, чтобы модель хотела искать Long/Short
     # Индексы: [Short, Flat, Long]
-    class_weights = np.array([1.0, 0.8, 1.0], dtype=np.float32)
+    class_weights = total_samples / (len(unique) * counts.astype(np.float32))
+    class_weights = class_weights / class_weights[0]
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
 
     for k, v, w in zip(unique, counts, class_weights):
