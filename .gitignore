@@ -1,3 +1,8 @@
+# Environment & Secrets
+.env
+*.env
+.env.*
+
 # IDEs and editors
 .idea/
 .vscode/
@@ -13,11 +18,10 @@ __pycache__/
 *.pyd
 .pytest_cache/
 
-# Quanti Project Artefacts (Автогенерация и тяжелые файлы)
+# Quanti Project Artefacts
 data/
 models/
-reports/
 
-# Дополнительный мусор ОС
+
 .DS_Store
 Thumbs.db
