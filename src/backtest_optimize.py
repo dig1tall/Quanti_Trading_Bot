@@ -1,3 +1,5 @@
+"""Module for grid search optimization of model execution thresholds and risk parameters using VectorBT."""
+
 import os
 import logging
 import numpy as np
@@ -13,10 +15,17 @@ from src.model import QuantiGRU
 logger = logging.getLogger(__name__)
 
 def run_optimization_search(val_data_path=None):
-    logger.info("=== Запуск глобальной оптимизации параметров Quanti (Лонг + Шорт Пороги) ===")
+    """Runs a grid search over long/short thresholds, stop-loss, and take-profit parameters on validation data.
+
+        Args:
+            val_data_path: Optional custom path to validation parquet file.
+
+        Returns:
+            dict: Optimal parameters matching the top strategy by total return.
+        """
+    logger.info("Starting global optimization search for long/short thresholds and risk limits...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # 1. Инференс модели
     val_loader = get_backtest_loader()
     model_path = os.path.join(PROJECT_ROOT, "models", "best_quanti_model.pth")
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
@@ -43,7 +52,6 @@ def run_optimization_search(val_data_path=None):
             all_raw_probs.append(probs.cpu().numpy())
     raw_probs_matrix = np.vstack(all_raw_probs)
 
-    # 2. Идентичная backtest.py синхронизация дат и цен
     target_val_path = val_data_path if val_data_path is not None else config.VAL_FEATURES_PATH
     df_features_file = pd.read_parquet(target_val_path)
     for date_col in ['Date', 'date']:
@@ -64,7 +72,6 @@ def run_optimization_search(val_data_path=None):
     val_high = df_raw.loc[val_dates, 'High'].copy()
     val_low = df_raw.loc[val_dates, 'Low'].copy()
 
-    # 3. Сборка сетки
     thresholds_long = np.arange(0.51, 0.62, 0.01)
     thresholds_short = np.arange(0.29, 0.45, 0.01)
     stop_losses = np.arange(0.005, 0.11, 0.005)
@@ -72,8 +79,8 @@ def run_optimization_search(val_data_path=None):
 
     exit_threshold = BACKTEST_PARAMS['soft_exit_threshold']
 
-    logger.info(f"Размерность сетки: Th_Long={len(thresholds_long)}, Th_Short={len(thresholds_short)}, SL={len(stop_losses)}, TP={len(take_profits)}")
-    logger.info(f"Всего комбинаций для vectorbt: {len(thresholds_long) * len(thresholds_short) * len(stop_losses) * len(take_profits)}")
+    logger.info(f"Grid dimension sizes: Th_Long={len(thresholds_long)}, Th_Short={len(thresholds_short)}, SL={len(stop_losses)}, TP={len(take_profits)}")
+    logger.info(f"Total parameter combinations: {len(thresholds_long) * len(thresholds_short) * len(stop_losses) * len(take_profits)}")
 
     entries_list, exits_list = [], []
     short_entries_list, short_exits_list = [], []
@@ -89,7 +96,6 @@ def run_optimization_search(val_data_path=None):
                 p_short, p_flat, p_long = prob_vector[0], prob_vector[1], prob_vector[2]
 
                 if current_signal == 0.0:
-                    # ИДЕНТИЧНОЕ С УСЛОВИЕМ В backtest.py
                     if p_long >= th_long and p_long > p_short and p_long > p_flat:
                         current_signal = 1.0
                     elif p_short >= th_short and p_short > p_long and p_short > p_flat:
@@ -103,7 +109,7 @@ def run_optimization_search(val_data_path=None):
 
                 signals[idx] = current_signal
 
-            # КРИТИЧЕСКИ ВАЖНЫЙ СДВИГ СИГНАЛОВ НА 1 СВЕЧУ!
+            # shift signals by 1 bar to align execution with t+1 open
             signals_series = pd.Series(signals, index=val_close.index).shift(1).fillna(0.0)
 
             ent = (signals_series == 1.0)
@@ -121,17 +127,16 @@ def run_optimization_search(val_data_path=None):
 
     m_index = pd.MultiIndex.from_tuples(param_tuples, names=['th_long', 'th_short', 'stop_loss', 'take_profit'])
 
-    logger.info("Сборка матриц сигналов...")
+    logger.info("Building vector signal matrices...")
     m_entries = pd.concat(entries_list, axis=1, keys=m_index)
     m_exits = pd.concat(exits_list, axis=1, keys=m_index)
     m_short_entries = pd.concat(short_entries_list, axis=1, keys=m_index)
     m_short_exits = pd.concat(short_exits_list, axis=1, keys=m_index)
 
-    logger.info("Запуск параллельного векторного бэктеста...")
+    logger.info("Executing parallel vectorbt simulation across parameter grid...")
     sl_array = m_index.get_level_values('stop_loss').values
     tp_array = m_index.get_level_values('take_profit').values
 
-    # ИДЕНТИЧНЫЙ НАБОР ПАРАМЕТРОВ С ПУНКТОМ 5 В backtest.py
     portfolio = vbt.Portfolio.from_signals(
         close=val_close,
         high=val_high,
@@ -140,8 +145,8 @@ def run_optimization_search(val_data_path=None):
         exits=m_exits,
         short_entries=m_short_entries,
         short_exits=m_short_exits,
-        size=0.1,                          # Синхронизировано
-        size_type='percent',               # Синхронизировано
+        size=0.1,
+        size_type='percent',
         init_cash=BACKTEST_PARAMS['init_cash'],
         fees=BACKTEST_PARAMS['fee_rate'],
         slippage=BACKTEST_PARAMS['slippage'],
@@ -159,11 +164,11 @@ def run_optimization_search(val_data_path=None):
         'Total Trades': portfolio.trades.count()
     }, index=m_index).sort_values(by='Total Return [%]', ascending=False)
 
-    print("\n" + "="*80)
-    print("   ТОП-10 ЛУЧШИХ КОМБИНАЦИЙ ПАРАМЕТРОВ ПО TOTAL RETURN")
-    print("="*80)
+    print("\n" + "=" * 80)
+    print("   TOP 10 PARAMETER CONFIGURATIONS BY TOTAL RETURN")
+    print("=" * 80)
     print(stats_df.head(10).to_string())
-    print("="*80)
+    print("=" * 80)
 
     best_config = stats_df.index[0]
 
@@ -174,7 +179,7 @@ def run_optimization_search(val_data_path=None):
         'take_profit': float(best_config[3]),
         'soft_exit_threshold': float(exit_threshold)
     }
-    logger.info(f"[Оптимизатор] Оптимальные параметры: TH_Long={best_params_dict['threshold_long']:.2f}, TH_Short={best_params_dict['threshold_short']:.2f}, SL={best_params_dict['stop_loss']:.3f}, TP={best_params_dict['take_profit']:.2f}")
+    logger.info(f"Optimal parameters found: TH_Long={best_params_dict['threshold_long']:.2f}, TH_Short={best_params_dict['threshold_short']:.2f}, SL={best_params_dict['stop_loss']:.3f}, TP={best_params_dict['take_profit']:.2f}")
     return best_params_dict
 
 if __name__ == "__main__":

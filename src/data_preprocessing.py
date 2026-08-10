@@ -1,3 +1,5 @@
+"""Module for custom feature scaling, serialization, and real-time data normalization."""
+
 import os
 import logging
 import json
@@ -11,29 +13,34 @@ logger = logging.getLogger(__name__)
 
 
 class Scaler:
-    """
-    Класс для ручного масштабирования признаков.
-    Поддерживает методы: 'standard', 'minmax', 'robust'.
-    Запоминает параметры на Train-выборке, сериализует их в файл и применяется в Real-time/Backtest.
-    """
+    """Manages manual feature scaling via Standard, MinMax, or Robust normalization."""
+
     def __init__(self, method: str = SCALING_PARAMS.get('method', 'robust')):
+        """Initializes scaling strategy and parameter registry."""
+
         if method not in ['standard', 'minmax', 'robust']:
             raise ValueError("Допустимые методы: 'standard', 'minmax', 'robust'")
         self.method = method
-        self.params = {}  # Здесь хранятся коэффициенты для каждой колонки
+        self.params = {}
 
     def fit(self, df: pd.DataFrame, columns: list) -> None:
-        """Вычисляет и сохраняет статистические параметры для указанных числовых колонок."""
-        logger.info(f"Инициализация Scaler (метод: {self.method}) на обучающей выборке...")
-        self.params = {}  # Сбрасываем старые параметры перед переобучением
+        """Calculates statistical parameters for scaling across targeted columns.
+
+            Args:
+                df: Input training dataframe.
+                columns: List of feature column names to scale.
+        """
+
+        logger.info(f"Fitting Scaler ({self.method} method) on training features...")
+        self.params = {}
 
         for col in columns:
             if col not in df.columns:
-                logger.warning(f"Колонка {col} не найдена в DataFrame при fit. Пропускаем.")
+                logger.warning(f"Column {col} not present in input dataframe. Skipping fit.")
                 continue
 
             if not np.issubdtype(df[col].dtype, np.number):
-                logger.warning(f"Колонка {col} не является числовой. Масштабирование невозможно.")
+                logger.warning(f"Column {col} is non-numeric. Skipping fit.")
                 continue
 
             if self.method == 'minmax':
@@ -67,12 +74,13 @@ class Scaler:
                     'iqr': iqr_val
                 }
 
-        logger.info(f"Параметры масштабирования успешно сохранены для {len(self.params)} признаков.")
+        logger.info(f"Saved scaling parameters for {len(self.params)} features.")
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Применяет сохраненные параметры масштабирования к указанным колонкам."""
+        """Applies fitted scaling parameters to specified numerical columns."""
+
         if not self.params:
-            raise ValueError("Scaler еще не обучен или не загружен! Сначала вызови fit() или load().")
+            raise ValueError("Scaler is not fitted or loaded. Call fit() or load() first.")
 
         df_scaled = df.copy()
 
@@ -80,7 +88,6 @@ class Scaler:
             if col not in df_scaled.columns:
                 continue
 
-            # Приводим к float64 во избежание конфликтов типов при делении массивов
             values = df_scaled[col].to_numpy().astype(float)
 
             if self.method == 'standard':
@@ -101,12 +108,14 @@ class Scaler:
         return df_scaled
 
     def fit_transform(self, df: pd.DataFrame, columns: list) -> pd.DataFrame:
-        """Метод для одновременного обучения и трансформации."""
+        """Fits scaler parameters and transforms input dataframe in a single call."""
+
         self.fit(df, columns)
         return self.transform(df)
 
     def save(self, file_path: str = None) -> None:
-        """Сохраняет параметры скейлера в JSON файл."""
+        """Serializes current scaler settings and parameters to a JSON file."""
+
         if not file_path:
             models_dir = os.path.join(config.PROJECT_ROOT, "models")
             os.makedirs(models_dir, exist_ok=True)
@@ -115,43 +124,42 @@ class Scaler:
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump({'method': self.method, 'params': self.params}, f, indent=4, ensure_ascii=False)
-            logger.info(f"Параметры скейлера успешно сериализованы в файл: {file_path}")
+            logger.info(f"Scaler parameters serialized to {file_path}")
         except Exception as e:
-            logger.error(f"Ошибка при сохранении параметров скейлера: {e}", exc_info=True)
+            logger.error(f"Failed to save scaler parameters: {e}", exc_info=True)
 
     def load(self, file_path: str = None) -> None:
-        """Загружает параметры скейлера из JSON файла."""
+        """Loads serialized scaler parameters and method strategy from a JSON file."""
+
         if not file_path:
             file_path = os.path.join(config.PROJECT_ROOT, "models", "scaler_params.json")
 
         if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Файл параметров скейлера не найден по пути: {file_path}")
+            raise FileNotFoundError(f"Scaler parameters file not found at: {file_path}")
 
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             self.method = data['method']
             self.params = data['params']
-            logger.info(f"Параметры скейлера успешно загружены из файла: {file_path} (Метод: {self.method})")
+            logger.info(f"Scaler parameters loaded from {file_path} (method: {self.method})")
         except Exception as e:
-            logger.error(f"Ошибка при загрузке параметров скейлера: {e}", exc_info=True)
+            logger.error(f"Failed to load scaler parameters: {e}", exc_info=True)
             raise e
 
 
-# --- АВТОНОМНЫЙ ТЕСТ МОДУЛЯ ---
 if __name__ == "__main__":
     from src.config import setup_logging
 
     setup_logging(level=logging.INFO)
-    logger.info("=== Запуск Scaler в автономном режиме на реальных данных ===")
+    logger.info("Running Scaler in standalone mode...")
 
     file_path = config.FEATURES_FILE_PATH
 
     if os.path.exists(file_path):
         base_df = pd.read_parquet(file_path)
-        logger.info(f"Успешно загружен файл для теста: {file_path} (Размерность: {base_df.shape})")
+        logger.info(f"Loaded feature file: {file_path} (shape: {base_df.shape})")
 
-        # Исключаем сырые колонки, если они есть. Если их нет — скейлим всё.
         base_cols = ["Open", "High", "Low", "Close", "Volume"]
         cols_to_scale = [col for col in base_df.columns if col not in base_cols]
         if not cols_to_scale:
@@ -166,6 +174,6 @@ if __name__ == "__main__":
         new_scaler.load()
         scaled_df_2 = new_scaler.transform(base_df)
 
-        logger.info("Проверка сериализации прошла успешно! Данные защищены от утечек.")
+        logger.info("Serialization test passed. Parameter persistence verified.")
     else:
-        logger.error(f"Файл с признаками не найден по пути: {file_path}")
+        logger.error(f"Feature file not found at: {file_path}")

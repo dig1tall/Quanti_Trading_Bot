@@ -1,0 +1,21 @@
+### Quanti Backtest Comparative Table
+
+|**No.**|**Interval**| **Window / Horizon** |**Days in Test**|**Accuracy**|**Market**|**Bot Quanti**|**Delta**|**Result**|**Date**|
+|---|--|----------------------|---|---|---|---|---|---|---|
+|**1**|`1d`| 30 days              |356|54.00%|-38.78% (Buy&Hold)|1.06% (Buy&Hold)|+39.84%|Preserved capital and achieved a positive return in a falling market.|2026-06-16 22:00:00|
+|**2**|`1h`| 168 hours            |3433|49.64%|-26.85% (Buy&Hold)|-8.62% (Buy&Hold)|+18.23%|Lower accuracy, but saved 18% of the deposit by moving to cash.|2026-06-16 22:07:50|
+|**3**|`1d`| 90 days              |344|52.33%|-39.41% (Buy&Hold)|-28.54% (Buy&Hold)|+10.87%|Immediate overfitting; Early Stopping saved the model at epoch 1.|2026-06-16 22:13:37|
+|**4**|1d| 30 days              |356|50.84%|-38.38%|-29.36%|+9.02%|Honest VectorBT run. Constrained by fees and low Win Rate, but outperformed the benchmark.|2026-06-17 20:57:00|
+|**5**|1d| 30 days              |356|51.40%|-39.36%|+51.54%|+90.90%|Implemented threshold=0.0015 (cash). Filtered out flat market noise, drawdown dropped to 24%, portfolio ended in profit.|2026-06-17 21:05:50|
+|**6**|1d| 30 days              |356|47.75%|-39.35%|+44.11%|+84.06%|Baseline configuration validation run.|2026-06-18|
+|**7**|1m| 45 / 5m              |1.27|50.57%|-3.06%|+0.53%|+3.59%|**First successful HFT test.**|2026-06-18 14:31|
+|**8**|1m| 120 / 5m             |23.9|26.83%|-14.03%|-13.45%|+0.58%|Fixed timeframe desynchronization. Outperformed the falling market by 0.58% through strict smoothing and threshold=0.51, reducing trades to 61.|2026-06-21 01:44:25|
+|**9**|1m| 120 / 5m             |23.9|26.18%|-13.51%|-3.64%|+9.87%|Retraining combined with SL (0.2%) and TP (0.6%) adjustments. Reduced trade count to 30. Max drawdown reduced to 4.07%, preserving capital during market drop.|2026-06-21 01:59:01|
+|**10**|1m| 180 / 5m             |23.8|26.15%|-13.43%|-5.66%|+7.77%|Implemented dual checkpoint saving. Primary backtest at epoch 3 showed a heavy Short bias (161 vs 59). Awaiting evaluation on latest_stable_model (Test #11).|2026-06-21 02:33:30|
+|**11**|1m| 180 / 5m             |23.8|26.27%|-13.43%|-8.11%|+5.32%|Evaluation of stable epoch 6. Model mirrored bias into Longs (180 orders). Significant increase in trading fees ($468). Dual checkpoint saving removed; reverted to baseline pipeline.|2026-06-21 02:35:45|
+|**12**|1m| 120 / 5m             |23.9|45.37%|-13.56%|-19.36%|-5.80%|Complete feature refactoring (12 orthogonal features instead of 15). Model response improved, eliminating bias (806 Long / 400 Short). Trade frequency increased to 103; high trading fees ($1127) degraded return. Core feature foundation established.|2026-06-21 03:52:40|
+|**13**|1m| 120 / 5m             |23.9|45.35%|-12.80%|+0.93%|+13.74%|Early Stopping at epoch 1 prevented overfitting. Total trades reduced to 22, lowering fees to $264. Win Rate 50%, Sharpe 1.67, drawdown reduced to 2.83%. Successfully defended capital in a declining market.|2026-06-21 17:39:05|
+|**14**|1d| 20 / 1               |295|32.54%|-45.69%|+10.84%|+56.53%|**Targeted positional short strategy.** Ternary macro mode. Balanced confidence filtering achieved. Reduced friction costs to $92. Win Rate 71.4%, Sharpe 0.58. Successfully countered market downturn.|2026-06-27 17:34:32|
+|**15**|1d| 20 / 1               |295|28.14%|-46.39%|+189.02%|+235.41%|Test run of global strategy optimizer with 50X leverage and margin_share 0.1. Captured significant alpha during market decline.|2026-06-29 17:21:52|
+|**16**|1d| 20 / 1               |295|32.88%|-46.23%|+57.77%|+104.00%|Executed parameter grid search (26k combinations). Identified optimal entry thresholds (L:0.56, S:0.36), SL (4%), and TP (6%). Maximized performance metrics: Sharpe 2.37, Win Rate 67.6%.|2026-06-30 19:09:22|
+|**17**|1d| 30 / 1               |304|44.74%|-45.24%|+12.15%|+57.39%|Full pipeline. Optimizer found TH (L:0.56, S:0.41), SL (10.5%), and TP (10%). Sharpe 1.29, WinRate 61.5%, drawdown 9.36%. Capital preserved and alpha captured in a falling market.|2026-08-10 19:38:18|

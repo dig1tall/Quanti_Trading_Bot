@@ -1,3 +1,4 @@
+"""Module for running backtesting simulation using VectorBT and PyTorch model predictions."""
 import os
 import logging
 import torch
@@ -14,13 +15,14 @@ from src.model import QuantiGRU
 logger = logging.getLogger(__name__)
 
 def run_backtest():
-    logger.info("=== Запуск промышленного бэктестинга Quanti Ver 2.1.0 (Fixed Bias & Signals) ===")
+    """Runs out-of-sample backtest evaluation using trained model predictions."""
+    logger.info("Starting Quanti backtest engine...")
     device = torch.device(TRAINING_PARAMS.get('device', 'cpu') if torch.cuda.is_available() else 'cpu')
 
     val_loader = get_backtest_loader()
     model_path = os.path.join(PROJECT_ROOT, "models", "best_quanti_model.pth")
     if not os.path.exists(model_path):
-        logger.error(f"Критическая ошибка: файл весов {model_path} не найден!")
+        logger.error("Model weights file not found: %s", model_path)
         return
 
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
@@ -52,28 +54,27 @@ def run_backtest():
     raw_probs_matrix = np.vstack(all_raw_probs)
     targets = np.array(all_targets)
 
-    # 1. ЧЕСТНЫЕ МЕТРИКИ МОДЕЛИ (Оправданный Flat)
-    # Вычисляем истинные классы предсказаний через argmax, а не через состояние позиции
+    # calculate model accuracy from raw predictions
     raw_model_preds = np.argmax(raw_probs_matrix, axis=1)
     total_accuracy = np.mean(raw_model_preds == targets) * 100
 
-    # 2. ИНТЕРПРЕТАЦИЯ СИГНАЛОВ И ЛОГИКА ТОРГОВЛИ
+    # set threshold params for signal state machine
     entry_threshold_long = BACKTEST_PARAMS.get('threshold_long', 0.52)
     entry_threshold_short = BACKTEST_PARAMS.get('threshold_short', 0.42)
     exit_threshold = BACKTEST_PARAMS.get('soft_exit_threshold', 0.33)
 
-    logger.info(f"Рабочие пороги ВХОДА: Long >= {entry_threshold_long:.2f}, Short >= {entry_threshold_short:.2f}")
-    logger.info(f"Порог мягкого ВЫХОДА в кэш: < {exit_threshold:.2f}")
+    logger.info(f"Entry thresholds: long >= {entry_threshold_long:.2f}, short >= {entry_threshold_short:.2f}")
+    logger.info(f"Exit threshold: < {exit_threshold:.2f}")
 
     signals = np.zeros(len(raw_probs_matrix), dtype=np.float32)
     current_signal = 0.0
 
+    # process probability matrix into trading state signals
     for idx in range(len(raw_probs_matrix)):
         prob_vector = raw_probs_matrix[idx]
         p_short, p_flat, p_long = prob_vector[0], prob_vector[1], prob_vector[2]
 
         if current_signal == 0.0:
-            # Вход только если соответствующий трендовый класс доминирует над Flat и альтернативой
             if p_long >= entry_threshold_long and p_long > p_short and p_long > p_flat:
                 current_signal = 1.0
             elif p_short >= entry_threshold_short and p_short > p_long and p_short > p_flat:
@@ -87,7 +88,7 @@ def run_backtest():
 
         signals[idx] = current_signal
 
-    # 3. ТОЧНАЯ СИНХРОНИЗАЦИЯ ДАТ И УСТРАНЕНИЕ LOOK-AHEAD BIAS
+    # align historical feature index with dataset windows
     val_path = config.VAL_FEATURES_PATH
     df_features_file = pd.read_parquet(val_path)
     for date_col in ['Date', 'date']:
@@ -95,7 +96,6 @@ def run_backtest():
             df_features_file.set_index(date_col, inplace=True)
     df_features_file = df_features_file.sort_index()
 
-    # Берем срез дат, строго совпадающий с выходами PyTorch Dataset
     seq_len = MODEL_PARAMS.get('sequence_length', 20)
     val_dates = df_features_file.index[seq_len - 1:]
 
@@ -109,17 +109,16 @@ def run_backtest():
     val_high = df_raw.loc[val_dates, 'High'].copy()
     val_low = df_raw.loc[val_dates, 'Low'].copy()
 
-    # КРИТИЧЕСКИ ВАЖНО: Сдвигаем сигналы на 1 свечу вперед (.shift(1)),
-    # так как сигнал от закрытия бара T может быть исполнен только на баре T+1!
+    # shift signals by 1 bar to execute on t+1 open price
     signals_series = pd.Series(signals, index=val_close.index).shift(1).fillna(0.0)
 
-    # 4. МАСКИ ОРДЕРОВ
+    # map signal states to entry/exit masks
     entries = (signals_series == 1.0)
     exits = (signals_series == 0.0)
     short_entries = (signals_series == -1.0)
     short_exits = (signals_series == 0.0)
 
-    # 5. ДВИЖОК СИМУЛЯЦИИ VECTORBT С ФИКСИРОВАННЫМ РАЗМЕРОМ ПОЗИЦИИ
+    # run vectorbt backtest engine with execution on next open
     portfolio = vbt.Portfolio.from_signals(
         close=val_close,
         high=val_high,
@@ -138,13 +137,12 @@ def run_backtest():
         freq='1D'
     )
 
-    # 6. РАСЧЕТ И ВЫВОД КОРРЕКТНЫХ МЕТРИК
     unique_preds, pred_counts = np.unique(raw_model_preds, return_counts=True)
     pred_dist = dict(zip(unique_preds, pred_counts))
 
-    logger.info("=== ИТОГОВЫЕ МЕТРИКИ СИМУЛЯЦИИ VECTORBT ===")
-    logger.info(f"Общая точность модели (Total Model Accuracy): {total_accuracy:.2f}%")
-    logger.info(f"Распределение сырых предсказаний модели (0: Short, 1: Flat, 2: Long): {pred_dist}")
+    logger.info("=== VectorBT Simulation Summary ===")
+    logger.info(f"Total Model Accuracy:: {total_accuracy:.2f}%")
+    logger.info(f"Raw Prediction Distribution (0: Short, 1: Flat, 2: Long): {pred_dist}")
     logger.info(f"\n{portfolio.stats().to_string()}")
 
     if BACKTEST_PARAMS.get('save_plots', False):
@@ -155,5 +153,6 @@ def run_backtest():
 
 if __name__ == "__main__":
     from src.config import setup_logging
+
     setup_logging(level=logging.INFO)
     run_backtest()
