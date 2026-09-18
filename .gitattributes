@@ -1,1 +1,6 @@
-*.py linguist-language=Python
+*.html linguist-detectable=false
+
+.idea/** linguist-vendored
+
+* linguist-vendored
+*.py linguist-vendored=false
